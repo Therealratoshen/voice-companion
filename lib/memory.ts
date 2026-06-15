@@ -6,7 +6,7 @@ Keep responses short and conversational (1-3 sentences).
 Be empathetic. Never say you are an AI unless asked.
 Remember previous context from memory.`;
 
-// Search memory
+// Search memory using FULLTEXT (no Mem9 on serverless tier)
 export async function searchMemory(userId: string, query: string, limit = 5) {
   const [rows] = await pool.execute<any[]>(
     `SELECT content, channel, confidence, created_at
@@ -15,6 +15,20 @@ export async function searchMemory(userId: string, query: string, limit = 5) {
      ORDER BY created_at DESC
      LIMIT ?`,
     [userId, limit]
+  );
+  return rows;
+}
+
+// Search memory by FULLTEXT relevance
+export async function searchMemoryFulltext(userId: string, query: string, limit = 5) {
+  const [rows] = await pool.execute<any[]>(
+    `SELECT content, channel, confidence, created_at,
+            MATCH(content) AGAINST(? IN NATURAL LANGUAGE MODE) AS relevance
+     FROM user_memory
+     WHERE user_id = ? AND MATCH(content) AGAINST(? IN NATURAL LANGUAGE MODE)
+     ORDER BY relevance DESC
+     LIMIT ?`,
+    [query, userId, query, limit]
   );
   return rows;
 }

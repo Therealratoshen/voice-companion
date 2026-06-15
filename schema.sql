@@ -1,21 +1,20 @@
 -- ============================================================
--- Voice AI Companion — TiDB Schema
--- Run this in TiDB Cloud Console → AI Features → enable Mem9
+-- Voice AI Companion — TiDB Schema (FULLTEXT, no Mem9)
+-- Run this in TiDB Cloud Console → SQL Editor
 -- ============================================================
 
--- Main memory with Mem9 vectors
+-- Main memory (FULLTEXT search, no vector index)
 CREATE TABLE IF NOT EXISTS user_memory (
   id BIGINT AUTO_RANDOM PRIMARY KEY,
   user_id VARCHAR(64) NOT NULL,
   memory_key VARCHAR(128),
   content TEXT NOT NULL,
-  embedding MEM9(768),
   channel VARCHAR(16) DEFAULT 'both',
   confidence FLOAT DEFAULT 1.0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FULLTEXT (content),
-  VECTOR INDEX (embedding)
+  INDEX idx_user_id (user_id)
 );
 
 -- Raw conversation log
