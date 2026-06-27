@@ -1,4 +1,4 @@
-# Voice AI Companion — Rina v3 (Agentic)
+# Voice AI Companion — NewMe v3 (Agentic)
 
 A real-time voice AI companion with persistent memory, web search, code execution, reminders, and smart task routing. Built with Next.js, WebSocket, Groq, OpenClaw agent, Edge TTS, and TiDB Mem9.
 
@@ -9,7 +9,7 @@ A real-time voice AI companion with persistent memory, web search, code executio
 ## What's New in v3
 
 - **OpenClaw Agent** — function calling for real tasks: web search, code execution, reminders
-- **Confirmation patterns** — Rina asks before taking action ("lanjutkan?")
+- **Confirmation patterns** — NewMe asks before taking action ("lanjutkan?")
 - **Response chunking** — long answers broken into voice-friendly pieces
 - **Skill indicators** — UI shows which skill is active (🔍 Searching, 💻 Running code...)
 - **TiDB Mem9 ready** — semantic memory search (falls back to FULLTEXT)
@@ -135,7 +135,7 @@ SERPAPI_KEY=your_key      # optional, for better search
 
 ---
 
-## What Rina Can Do
+## What NewMe Can Do
 
 ### Casual Chat (Groq Llama)
 - Ngobrol santai
@@ -207,7 +207,7 @@ voice-companion/
 ## Testing
 
 **Memory:**
-1. Tell Rina your name
+1. Tell NewMe your name
 2. End call
 3. New call — ask "Siapa nama saya?"
 

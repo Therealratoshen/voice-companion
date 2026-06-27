@@ -1,5 +1,5 @@
 /**
- * Voice AI Companion Server — Rina v3 (Agentic)
+ * Voice AI Companion Server — NewMe v3 (Agentic)
  *
  * Voice-first AI companion with:
  * - OpenClaw agent (function calling: search, code, reminders)
@@ -41,18 +41,17 @@ const getSession = (userId) => {
   return s;
 };
 
-// ── Rina Persona ──────────────────────────────────────────────────────────
-const RINA_SYSTEM = `Kamu "Rina" — asisten suara yang hangat dan teman bicara.
-- Perempuan Indonesia, usia 25-30 tahun
-- Bicara santai tapi nggak berlebihan
-- Jawab 1-3 kalimat, jangan panjang-panjang
-- Tunjukkan bahwa kamu ingat konteks dari percakapan sebelumnya
-- Kalau pengguna terlihat frustrasi, tenangkan dan bantu dengan baik
-- Jangan pernah bilang kamu AI atau robot
-- Pakai bahasa yang natural, seolah-olah ngobrol sama teman
-- Emoji boleh dipakai tapi wajar-wajar saja, nggak berlebihan
-- Kalau perlu mengambil tindakan, konfirmasi dulu ke pengguna
-- Kalau hasil sangat panjang (>5 kalimat), potong jadi bagian-bagian kecil`;
+// ── NewMe Persona ──────────────────────────────────────────────────────────
+const NEWME_SYSTEM = `Kamu "NewMe" — asisten suara AI yang helpful dan natural.
+- Bisa ngobrol dalam Bahasa Indonesia atau English, sesuai preferensi pengguna
+- Jawab singkat dan tepat — 1-3 kalimat untuk hal sederhana, potong jawaban panjang jadi bagian kecil
+- Tunjukkan kamu ingat konteks percakapan sebelumnya
+- Kalau pengguna frustrasi, tenangkan dulu, baru bantu
+- Jangan bilang kamu AI atau robot
+- Bicara natural, nggak kaku, seolah ngobrol sama teman
+- Kalau perlu ambil tindakan, konfirmasi dulu ("lanjutkan?")
+- Tool yang kamu punya: cari di internet, jalanin kode, bikin pengingat, ingat fakta tentang pengguna
+- Kalau hasil panjang (>3 kalimat), pecah jadi bagian-bagian kecil`;
 
 // ── OpenClaw Agent (function calling) ─────────────────────────────────────
 const AGENT_TOOLS = [
@@ -197,7 +196,7 @@ async function extractAndSave(userId, userMsg, assistantMsg) {
       role: "system",
       content: `Ekstrak 0-2 fakta penting. JSON only: [{"key":"...","fact":"...","confidence":0.8}]`,
     },
-    { role: "user", content: `User: ${userMsg}\nRina: ${assistantMsg}` },
+    { role: "user", content: `User: ${userMsg}\nNewMe: ${assistantMsg}` },
   ];
   try {
     const res = await groqChat(messages);
@@ -404,8 +403,8 @@ async function handleVoiceSession(ws, audioBuffer, userId) {
 
 async function groqWithContext(transcript, history, memoryContext) {
   const systemContent = memoryContext
-    ? `${RINA_SYSTEM}\n\nYang kamu tahu:\n${memoryContext}`
-    : RINA_SYSTEM;
+    ? `${NEWME_SYSTEM}\n\nYang kamu tahu:\n${memoryContext}`
+    : NEWME_SYSTEM;
 
   const messages = [
     { role: "system", content: systemContent },
@@ -487,7 +486,7 @@ app.prepare().then(async () => {
       if (p.pathname === "/test_audio") {
         res.writeHead(200, { "Content-Type": "audio/mpeg", "Access-Control-Allow-Origin": "*" });
         try {
-          const mp3 = await edgeTTS("Halo! Aku Rina. Ada yang bisa aku bantu?");
+          const mp3 = await edgeTTS("Halo! Aku NewMe. Ada yang bisa aku bantu?");
           res.end(mp3);
         } catch (e) {
           res.writeHead(500);
@@ -549,7 +548,7 @@ app.prepare().then(async () => {
   });
 
   server.listen(port, hostname, () => {
-    console.log(`\n> Rina v3 (Agentic) ready on http://${hostname}:${port}/voice`);
+    console.log(`\n> NewMe v3 (Agentic) ready on http://${hostname}:${port}/voice`);
     console.log(`> WebSocket: ws://${hostname}:${port}/ws`);
     console.log(`> OpenClaw: ${OPENCLAW_URL}${process.env.OPENCLAW_API_KEY ? " [connected]" : " [not configured]"}\n`);
   });

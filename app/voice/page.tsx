@@ -22,7 +22,7 @@ interface MemoryEvent {
   preview?: string[];
 }
 
-const SESSION_KEY = "rina_session_id_v3";
+const SESSION_KEY = "newme_session_id_v3";
 
 function getOrCreateSessionId(): string {
   if (typeof window === "undefined") return "guest";
@@ -35,7 +35,7 @@ function getOrCreateSessionId(): string {
 
 // ── Skill display names ──────────────────────────────────────────────────────
 const SKILL_LABELS: Record<string, string> = {
-  openclaw: "🧠 Rina Brain",
+  openclaw: "🧠 NewMe Brain",
   web_search: "🔍 Web Search",
   execute_code: "💻 Run Code",
   create_reminder: "⏰ Reminder",
@@ -378,7 +378,7 @@ export default function VoicePage() {
       <div className="flex items-center justify-between px-5 py-4 border-b border-white/5">
         <div>
           <h1 className="text-base font-semibold text-white/90 flex items-center gap-2">
-            Rina
+            NewMe
             {skillStatus && (
               <span className={`text-xs px-2 py-0.5 rounded-full bg-gradient-to-r ${SKILL_COLORS[skillStatus.name] || "from-gray-600 to-gray-600"} font-medium`}>
                 {SKILL_LABELS[skillStatus.name] || skillStatus.name}
@@ -443,7 +443,7 @@ export default function VoicePage() {
             <div className="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mb-4 animate-pulse">
               <span className="text-3xl">👋</span>
             </div>
-            <p className="text-white/30 text-sm">Rina is ready to help</p>
+            <p className="text-white/30 text-sm">NewMe is ready to help</p>
             <p className="text-white/15 text-xs mt-1">She remembers things between calls</p>
           </div>
         )}
@@ -456,7 +456,7 @@ export default function VoicePage() {
                 : "bg-white/8 text-white/90 rounded-bl-md"
             }`}>
               <span className="text-[10px] opacity-50 uppercase tracking-wider block mb-1">
-                {entry.role === "user" ? "You" : "Rina"}
+                {entry.role === "user" ? "You" : "NewMe"}
               </span>
               {entry.text}
               {entry.toolCalls && entry.toolCalls.length > 0 && (
@@ -475,7 +475,7 @@ export default function VoicePage() {
         {liveText && (
           <div className="flex justify-start">
             <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-white/8 px-4 py-3 text-sm text-white/90">
-              <span className="text-[10px] opacity-50 uppercase tracking-wider block mb-1">Rina</span>
+              <span className="text-[10px] opacity-50 uppercase tracking-wider block mb-1">NewMe</span>
               {liveText}<span className="animate-pulse opacity-70"> ▋</span>
             </div>
           </div>
@@ -485,7 +485,7 @@ export default function VoicePage() {
         {aiState === "thinking" && !liveText && (
           <div className="flex justify-start">
             <div className="rounded-2xl rounded-bl-md bg-white/8 px-4 py-3">
-              <span className="text-xs text-white/50">Rina is thinking...</span>
+              <span className="text-xs text-white/50">NewMe is thinking...</span>
               <div className="flex gap-1 mt-2">
                 {[0, 1, 2].map((k) => (
                   <div key={k} className="w-1.5 h-1.5 rounded-full bg-white/30 animate-bounce" style={{ animationDelay: `${k * 150}ms` }} />
@@ -520,7 +520,7 @@ export default function VoicePage() {
       {isConfirming && callState === "connected" && (
         <div className="mx-4 mb-2 bg-amber-900/30 border border-amber-700/40 rounded-xl px-4 py-2 text-amber-300 text-xs flex items-center gap-2">
           <span>🤔</span>
-          <span>Rina is asking for confirmation. Say "ya" or " lanjutkan" to proceed.</span>
+          <span>NewMe is asking for confirmation. Say "ya" or " lanjutkan" to proceed.</span>
         </div>
       )}
 
@@ -535,7 +535,7 @@ export default function VoicePage() {
         {callState === "connected" && (
           <p className="text-xs text-white/40 text-center min-h-[20px]">
             {isMuted ? "🎤 Unmute to speak" :
-             aiState === "speaking" ? "🔊 Rina is talking..." :
+             aiState === "speaking" ? "🔊 NewMe is talking..." :
              aiState === "thinking" ? "💭 Processing..." :
              "Speak naturally"}
           </p>
