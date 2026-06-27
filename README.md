@@ -2,6 +2,8 @@
 
 A real-time voice AI companion built with Next.js, WebSocket, Groq (LLM + STT), and MiniMax (TTS). Runs in the browser — open the URL, tap call, and talk naturally.
 
+> **Also relevant:** This project is part of a broader voice AI R&D effort that includes an [Agora AI Phone Agent](#-agora-ai-phone-agent) for Indonesian SMEs. See the [Agora projects →](#-agora-ai-agent-stack) below.
+
 ---
 
 ## Stack
@@ -103,16 +105,16 @@ voice-companion/
 ├── server.js           # Custom Next.js server + WebSocket handler
 ├── app/
 │   ├── voice/page.tsx  # Voice call UI (main page)
-│   └── audio-test/      # Audio diagnostics page
+│   └── audio-test/     # Audio diagnostics page
 ├── lib/
-│   ├── groq.ts          # Groq LLM + Whisper STT
-│   ├── minimax.ts       # MiniMax TTS
-│   ├── tidb.ts          # TiDB connection pool
-│   └── memory.ts        # Memory search (FULLTEXT)
+│   ├── groq.ts         # Groq LLM + Whisper STT
+│   ├── minimax.ts     # MiniMax TTS
+│   ├── tidb.ts         # TiDB connection pool
+│   └── memory.ts       # Memory search (FULLTEXT)
 ├── public/
-│   ├── audio-test.html  # Standalone audio diagnostic
+│   ├── audio-test.html # Standalone audio diagnostic
 │   └── test-playback.html
-└── schema.sql           # TiDB schema
+└── schema.sql          # TiDB schema
 ```
 
 ---
@@ -123,7 +125,7 @@ voice-companion/
 
 This project uses raw WebSocket for maximum control over the audio pipeline. The mic captures PCM via `MediaRecorder`, chunks are sent to the server, and TTS audio flows back as base64 MP3 chunks.
 
-**Downside:** The browser mic can't be shared with other tabs while the call is active.
+**Trade-off:** The browser mic can't be shared with other tabs during a call.
 
 ### Why energy-based VAD?
 
@@ -136,6 +138,70 @@ Low latency, good quality Mandarin voice support, and competitive pricing for Ch
 ### Why TiDB?
 
 Serverless MySQL-compatible database. Works well on free tier, supports FULLTEXT indexes for naive memory search without needing a separate Mem9/vector service.
+
+---
+
+## 🤖 Agora AI Agent Stack
+
+This voice-companion project is one half of a broader voice AI R&D effort. The other half is an **Agora-powered AI Phone Agent** targeting Indonesian SMEs — a different architecture optimized for phone calls rather than browser-based voice chat.
+
+### Project A: AI Phone Agent for Indonesian SMEs
+
+**Location:** `ai-phone-agent/`
+
+A landing-page + server setup for a phone-based AI agent targeting Indonesian small businesses. The agent handles inbound business calls 24/7 — answering common questions like hours, pricing, availability — reducing call volume for business owners.
+
+> "Jawab pertanyaan yang sama 50 kali sehari itu capek banget. Terutama kalau Anda juga harus handle WA, chat, marketplace — telephon lagi. Waktu Anda hilang untuk hal yang seharusnya AI bisa handle."
+
+Key features:
+- 24/7 AI telephone agent
+- Indonesian language support (ASR + TTS)
+- Multi-persona support (different agent personalities)
+- Integration with Agora RTC for voice
+
+### Project B: Agora Conversational AI — Custom LLM Recipe
+
+**Location:** `agora-quickstart/recipe-custom-llm/`
+
+The official Agora reference implementation for building a custom LLM TTS pipeline into Agora's Conversational AI cloud. This is the bridge between a custom LLM/TTS backend and Agora's RTC network.
+
+```
+Browser (Next.js)
+  │ fetch /api/*
+  ▼
+Next.js ──rewrite──▶ Agent backend (:8000)
+                          │ CustomLLM(output_modalities=["audio"])
+                          ▼
+                       Agora ConvoAI Cloud
+                          │ POST <CUSTOM_LLM_URL> (your audio endpoint)
+                          ▼
+                       Custom audio endpoint → PCM audio → RTC
+```
+
+Key files:
+- `server/` — Python FastAPI backend with mounted `/audio` endpoint
+- `web/` — Next.js frontend
+- `AGENTS.md` / `ARCHITECTURE.md` — full design docs
+
+Setup:
+```bash
+bun run setup          # install deps + create venv
+ngrok http 8000        # expose backend publicly
+# Add ngrok URL to CUSTOM_LLM_URL in server/.env.local
+bun run dev            # start all services
+```
+
+---
+
+## Related Projects
+
+| Project | Description |
+|---------|-------------|
+| `voice-companion/` | Browser-based voice AI companion (WebSocket + Groq + MiniMax) |
+| `ai-phone-agent/` | Landing page for Indonesian SME phone AI agent |
+| `agora-quickstart/recipe-custom-llm/` | Agora Custom LLM TTS recipe (Python + Next.js) |
+| `band-agent/` | Band protocol agent (separate, experimental) |
+| `whatsapp-booking-agent/` | WhatsApp booking automation agent |
 
 ---
 
@@ -155,9 +221,10 @@ Serverless MySQL-compatible database. Works well on free tier, supports FULLTEXT
 
 ---
 
-## TODO
+## Roadmap
 
 - [ ] Replace naive FULLTEXT memory with proper reranking / Mem9
 - [ ] MiniMax STT integration (currently uses Groq Whisper only)
 - [ ] Multi-turn memory summarization to stay within context window
-- [ ] Optional: Add actual Agora RTC for better multi-tab audio sharing
+- [ ] Align AI Phone Agent backend with voice-companion memory layer
+- [ ] Add Indonesian language persona support to voice-companion
