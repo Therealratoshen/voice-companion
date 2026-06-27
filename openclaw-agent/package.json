@@ -1,0 +1,21 @@
+{
+  "name": "openclaw-agent",
+  "version": "2.0.0",
+  "description": "OpenClaw function-calling agent with web search, code execution, reminders, and Mem9 memory",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.0.0",
+    "express": "^4.18.2",
+    "mysql2": "^3.11.0",
+    "python-shell": "^5.0.0",
+    "vm2": "^3.9.19"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
