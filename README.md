@@ -1,8 +1,19 @@
-# Voice AI Companion
+# Voice AI Companion — Rina
 
-A real-time voice AI companion built with Next.js, WebSocket, Groq (LLM + STT), and MiniMax (TTS). Runs in the browser — open the URL, tap call, and talk naturally.
+A real-time voice AI companion with persistent memory. Built with Next.js, WebSocket, Groq, Edge TTS, and TiDB. Runs in the browser — open, tap call, talk naturally.
 
-> **Also relevant:** This project is part of a broader voice AI R&D effort that includes an [Agora AI Phone Agent](#-agora-ai-phone-agent) for Indonesian SMEs. See the [Agora projects →](#-agora-ai-agent-stack) below.
+> **Live demo:** [voice-companion.vercel.app/voice](https://voice-companion.vercel.app/voice)
+
+---
+
+## What's New (v2)
+
+- **Persistent memory** — Rina remembers things between calls using TiDB FULLTEXT search
+- **Memory extraction** — automatically saves key facts after each conversation turn
+- **Memory recall feedback** — visual indicator when Rina pulls from memory
+- **Session continuity** — session ID stored in localStorage, memory persists across page refreshes
+- **Better real-time feel** — VAD energy bar, AI speaking waves, thinking indicator
+- **Rina persona** — warm Indonesian AI companion, not a generic bot
 
 ---
 
@@ -14,8 +25,8 @@ A real-time voice AI companion built with Next.js, WebSocket, Groq (LLM + STT), 
 | Realtime | WebSocket (native, no Socket.io) |
 | Speech → Text | Groq Whisper (`whisper-large-v3`) |
 | LLM | Groq (`llama-3.3-70b-versatile`), streaming |
-| Text → Speech | MiniMax (`speech-02-hd`) |
-| Memory | TiDB (MySQL serverless, FULLTEXT search) |
+| Text → Speech | Edge TTS (Microsoft Neural, `id-ID-ArdiNeural`) |
+| Memory | TiDB (MySQL serverless, FULLTEXT index) |
 | Audio I/O | Web Audio API + MediaRecorder |
 | VAD | Energy-based silence detection (no external SDK) |
 
@@ -24,26 +35,34 @@ A real-time voice AI companion built with Next.js, WebSocket, Groq (LLM + STT), 
 ## How It Works
 
 ```
-Browser mic → MediaRecorder (webm) → WS → server.js
-                                           │
-                                           ├─ Groq Whisper → transcript
-                                           │                      │
-                                           ├─ Groq Llama (streaming)
-                                           │                      │
-                                           └─ MiniMax TTS ───────┘
-                                                       │
-                                              TTS chunks → WS → browser
-                                                              │
-                                                   Web Audio API playMp3Data()
+User taps call
+       ↓
+  Browser mic on
+  WebSocket connects with userId
+       ↓
+  Energy VAD detects speech
+  → sends audio chunk via WS
+       ↓
+  Server: Groq Whisper STT → transcript
+       ↓
+  Server: TiDB FULLTEXT search → memory context
+       ↓
+  Server: Groq Llama (streaming) + memory context
+       ↓
+  Each word → Edge TTS → MP3 chunk → WS → browser
+       ↓
+  Browser plays audio via decodeAudioData()
+  Mic auto-mutes while Rina speaks
+       ↓
+  After response: extract facts → TiDB memory
 ```
 
-1. User presses call → WebSocket connects → mic stream starts
-2. Energy-based VAD detects silence after speech → sends audio chunk via WS
-3. Server transcribes with Groq Whisper → gets text
-4. Text sent to Groq Llama with conversation memory from TiDB → streaming response
-5. Each LLM word is forwarded to MiniMax TTS → MP3 chunks sent back over WS
-6. Browser plays chunks via `playMp3Data()` using `decodeAudioData()` — mic is auto-muted while AI speaks to prevent feedback
-7. After TTS finishes, mic unmutes automatically
+**Memory flow:**
+1. Before LLM call → search TiDB for relevant memories (FULLTEXT)
+2. Inject memories into system prompt as context
+3. After LLM response → extract 0-2 key facts
+4. Upsert facts into `user_memory` table
+5. Notify client with memory recall/saved events
 
 ---
 
@@ -53,6 +72,14 @@ Browser mic → MediaRecorder (webm) → WS → server.js
 
 ```bash
 npm install
+```
+
+You'll also need **edge-tts** installed system-wide (for the TTS):
+
+```bash
+pip install edge-tts
+# or
+npx edge-tts-install  # if available
 ```
 
 ### 2. Configure environment
@@ -66,165 +93,143 @@ Fill in your keys:
 | Variable | Where to get it |
 |----------|----------------|
 | `GROQ_API_KEY` | [console.groq.com](https://console.groq.com) |
-| `MINIMAX_API_KEY` | [platform.minimaxi.com](https://platform.minimaxi.com) |
-| `MINIMAX_GROUP_ID` | MiniMax dashboard |
-| `MINIMAX_VOICE_ID` | Voice ID from MiniMax (default: `male-qn-qingse`) |
-| `TIDB_HOST` | TiDB Cloud console → Connection → Standard Connection |
+| `TIDB_HOST` | TiDB Cloud → Connection → Standard Connection |
 | `TIDB_PORT` | Usually `4000` |
 | `TIDB_USER` | TiDB username |
 | `TIDB_PASSWORD` | TiDB password |
-| `TIDB_DATABASE` | Database name |
+| `TIDB_DATABASE` | Database name (create one) |
 
 ### 3. Set up TiDB schema
 
-Run `schema.sql` in the TiDB Cloud SQL Editor:
+Run `schema.sql` in TiDB Cloud Console → SQL Editor:
 
 ```sql
--- From schema.sql — creates:
+-- Creates:
 --   user_memory   — FULLTEXT searchable conversation memory
 --   conversations — raw transcript log
 --   memory_logs   — memory audit trail
 ```
 
-### 4. Start the server
+### 4. Start
 
 ```bash
 npm run dev
-# or production:
-npm start
 ```
 
 Open [http://localhost:3456/voice](http://localhost:3456/voice)
 
 ---
 
-## Project Structure
+## File Structure
 
 ```
 voice-companion/
-├── server.js           # Custom Next.js server + WebSocket handler
+├── server.js           # Custom server: WebSocket + STT + LLM + TTS + Memory
 ├── app/
-│   ├── voice/page.tsx  # Voice call UI (main page)
-│   └── audio-test/     # Audio diagnostics page
+│   ├── voice/
+│   │   └── page.tsx    # Voice call UI (Rina persona)
+│   └── audio-test/
+│       └── page.tsx    # Audio diagnostics
 ├── lib/
-│   ├── groq.ts         # Groq LLM + Whisper STT
-│   ├── minimax.ts     # MiniMax TTS
-│   ├── tidb.ts         # TiDB connection pool
-│   └── memory.ts       # Memory search (FULLTEXT)
-├── public/
-│   ├── audio-test.html # Standalone audio diagnostic
-│   └── test-playback.html
-└── schema.sql          # TiDB schema
+│   ├── groq.ts         # Groq LLM + Whisper STT client
+│   ├── minimax.ts       # MiniMax TTS (optional, not used by default)
+│   ├── memory.ts        # TiDB memory layer (search, upsert, log)
+│   └── tidb.ts         # TiDB connection pool
+├── schema.sql          # TiDB schema
+└── .env.example        # Environment template
 ```
 
 ---
 
-## Key Architecture Decisions
+## Rina — AI Persona
 
-### Why WebSocket instead of Agora?
+Rina is a warm Indonesian female AI companion (age 25-30). Key traits:
 
-This project uses raw WebSocket for maximum control over the audio pipeline. The mic captures PCM via `MediaRecorder`, chunks are sent to the server, and TTS audio flows back as base64 MP3 chunks.
+- Speaks casual Indonesian naturally
+- Keeps responses short (1-3 sentences)
+- Remembers context from previous conversations
+- Shows empathy when user seems frustrated
+- Never reveals she's an AI
+- Uses emoji naturally, not excessively
 
-**Trade-off:** The browser mic can't be shared with other tabs during a call.
-
-### Why energy-based VAD?
-
-Keeps the dependency footprint small — no Silero, no external VAD service. At 16kHz sample rate, a 20ms RMS energy threshold of `0.02` works well for speech vs silence in normal indoor environments.
-
-### Why MiniMax TTS?
-
-Low latency, good quality Mandarin voice support, and competitive pricing for Chinese-language voice companions.
-
-### Why TiDB?
-
-Serverless MySQL-compatible database. Works well on free tier, supports FULLTEXT indexes for naive memory search without needing a separate Mem9/vector service.
+The persona is defined in `server.js` via `SYSTEM_PROMPT`. Edit it to change how Rina sounds.
 
 ---
 
-## 🤖 Agora AI Agent Stack
+## WebSocket Protocol
 
-This voice-companion project is one half of a broader voice AI R&D effort. The other half is an **Agora-powered AI Phone Agent** targeting Indonesian SMEs — a different architecture optimized for phone calls rather than browser-based voice chat.
+Connect to `ws://host/ws?userId=<session_id>`.
 
-### Project A: AI Phone Agent for Indonesian SMEs
+### Client → Server
 
-**Location:** `ai-phone-agent/`
-
-A landing-page + server setup for a phone-based AI agent targeting Indonesian small businesses. The agent handles inbound business calls 24/7 — answering common questions like hours, pricing, availability — reducing call volume for business owners.
-
-> "Jawab pertanyaan yang sama 50 kali sehari itu capek banget. Terutama kalau Anda juga harus handle WA, chat, marketplace — telephon lagi. Waktu Anda hilang untuk hal yang seharusnya AI bisa handle."
-
-Key features:
-- 24/7 AI telephone agent
-- Indonesian language support (ASR + TTS)
-- Multi-persona support (different agent personalities)
-- Integration with Agora RTC for voice
-
-### Project B: Agora Conversational AI — Custom LLM Recipe
-
-**Location:** `agora-quickstart/recipe-custom-llm/`
-
-The official Agora reference implementation for building a custom LLM TTS pipeline into Agora's Conversational AI cloud. This is the bridge between a custom LLM/TTS backend and Agora's RTC network.
-
-```
-Browser (Next.js)
-  │ fetch /api/*
-  ▼
-Next.js ──rewrite──▶ Agent backend (:8000)
-                          │ CustomLLM(output_modalities=["audio"])
-                          ▼
-                       Agora ConvoAI Cloud
-                          │ POST <CUSTOM_LLM_URL> (your audio endpoint)
-                          ▼
-                       Custom audio endpoint → PCM audio → RTC
+```jsonc
+// Start call
+{ "type": "audio_chunk", "data": "<base64 webm audio>" }
 ```
 
-Key files:
-- `server/` — Python FastAPI backend with mounted `/audio` endpoint
-- `web/` — Next.js frontend
-- `AGENTS.md` / `ARCHITECTURE.md` — full design docs
+### Server → Client
 
-Setup:
-```bash
-bun run setup          # install deps + create venv
-ngrok http 8000        # expose backend publicly
-# Add ngrok URL to CUSTOM_LLM_URL in server/.env.local
-bun run dev            # start all services
-```
+| Type | Payload | Description |
+|------|---------|-------------|
+| `transcript` | `{ text: string }` | User's speech as text |
+| `llm_word` | `{ text: string }` | Streaming word from LLM |
+| `llm_done` | `{ text: string }` | LLM response complete |
+| `tts_audio` | `{ data: string, mimeType: string }` | MP3 audio chunk (base64) |
+| `tts_fallback` | `{ text: string }` | TTS failed, use SpeechSynthesis |
+| `memory_recall` | `{ count, preview? }` | Rina is using memory context |
+| `memory_saved` | `{ count }` | New facts saved to memory |
+| `error` | `{ message: string }` | Something went wrong |
 
 ---
 
-## Related Projects
+## Memory Layer
 
-| Project | Description |
-|---------|-------------|
-| `voice-companion/` | Browser-based voice AI companion (WebSocket + Groq + MiniMax) |
-| `ai-phone-agent/` | Landing page for Indonesian SME phone AI agent |
-| `agora-quickstart/recipe-custom-llm/` | Agora Custom LLM TTS recipe (Python + Next.js) |
-| `band-agent/` | Band protocol agent (separate, experimental) |
-| `whatsapp-booking-agent/` | WhatsApp booking automation agent |
+TiDB stores two types of memory:
+
+1. **Facts** — extracted from conversation turns, stored in `user_memory`
+2. **Raw transcripts** — logged in `conversations` for audit and summary
+
+Memory is searched via FULLTEXT index before every LLM call. The most relevant memories are injected into Rina's system prompt as context.
+
+### Testing memory
+
+1. Start a call and tell Rina something memorable (e.g., "Nama saya Budi")
+2. End the call
+3. Start a new call
+4. Ask "Siapa nama saya?" — Rina should remember
+
+---
+
+## Audio Quality Notes
+
+- **Microphone**: WebRTC `getUserMedia` with echo cancellation and noise suppression
+- **VAD threshold**: 0.02 RMS energy at 16kHz — tweak for your environment
+- **TTS latency**: Edge TTS streams chunks as they're generated (~200-400ms first audio)
+- **Mic auto-mute**: Mic is disabled while Rina speaks to prevent feedback
+- **Fallback**: If Edge TTS fails, uses browser `SpeechSynthesis` API
 
 ---
 
 ## Troubleshooting
 
-**Microphone not working?**
-→ Visit `/audio-test` in the browser to run audio diagnostics
+**"Microphone access denied"**
+→ Visit the page over HTTPS or localhost. Browser requires secure context for mic.
 
-**AI not responding?**
-→ Check `GROQ_API_KEY` is set and has quota remaining
+**Rina not remembering**
+→ Check TiDB schema was created and FULLTEXT index exists. Check `TIDB_*` env vars.
 
-**TTS playing but cutting out?**
-→ Check `MINIMAX_API_KEY` and `MINIMAX_GROUP_ID` are correct
+**TTS not working**
+→ Run `edge-tts --text "test" --voice id-ID-ArdiNeural --write-media /tmp/test.mp3` from terminal to verify edge-tts is installed.
 
-**Memory not being recalled?**
-→ Verify TiDB schema was created and FULLTEXT index exists
+**WebSocket fails to connect**
+→ Make sure you're running `npm run dev` (not `next dev`) — the custom server handles WS upgrades.
 
 ---
 
 ## Roadmap
 
-- [ ] Replace naive FULLTEXT memory with proper reranking / Mem9
-- [ ] MiniMax STT integration (currently uses Groq Whisper only)
-- [ ] Multi-turn memory summarization to stay within context window
-- [ ] Align AI Phone Agent backend with voice-companion memory layer
-- [ ] Add Indonesian language persona support to voice-companion
+- [ ] Replace FULLTEXT with Mem9 vector search
+- [ ] MiniMax STT integration (as alternative to Whisper)
+- [ ] Multi-turn memory summarization
+- [ ] Session history page
+- [ ] Indonesian + English bilingual persona toggle

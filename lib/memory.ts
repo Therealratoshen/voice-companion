@@ -1,95 +1,138 @@
-import pool from './tidb';
-import { groqChat } from './groq';
+import mysql from 'mysql2/promise';
 
-const SYSTEM_PROMPT = `You are a warm, natural voice AI companion.
-Keep responses short and conversational (1-3 sentences).
-Be empathetic. Never say you are an AI unless asked.
-Remember previous context from memory.`;
+// Lazy singleton pool — don't connect until first query
+let _pool: mysql.Pool | null = null;
 
-// Search memory using FULLTEXT (no Mem9 on serverless tier)
-export async function searchMemory(userId: string, query: string, limit = 5) {
-  const [rows] = await pool.execute<any[]>(
-    `SELECT content, channel, confidence, created_at
+function getPool(): mysql.Pool {
+  if (!_pool) {
+    _pool = mysql.createPool({
+      host: process.env.TIDB_HOST,
+      port: Number(process.env.TIDB_PORT) || 4000,
+      user: process.env.TIDB_USER,
+      password: process.env.TIDB_PASSWORD,
+      database: process.env.TIDB_DATABASE,
+      ssl: { minVersion: 'TLSv1.2' },
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0,
+    });
+  }
+  return _pool;
+}
+
+export default getPool;
+
+// ── Helper: serialize BigInt in objects (TiDB returns BigInt for AUTO_RANDOM PKs) ──
+function serialize<T>(rows: T[]): T {
+  return JSON.parse(JSON.stringify(rows, (_, v) => typeof v === 'bigint' ? Number(v) : v));
+}
+
+// ── Search memory (FULLTEXT) ────────────────────────────────────────────────
+export async function searchMemoryFulltext(
+  userId: string,
+  query: string,
+  limit = 5
+): Promise<any[]> {
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    `SELECT id, user_id, memory_key, content, channel, confidence, created_at,
+            MATCH(content) AGAINST(? IN NATURAL LANGUAGE MODE) AS relevance
+     FROM user_memory
+     WHERE user_id = ? AND MATCH(content) AGAINST(? IN NATURAL LANGUAGE MODE)
+     ORDER BY relevance DESC, created_at DESC
+     LIMIT ?`,
+    [query, userId, query, limit]
+  );
+  return serialize(rows);
+}
+
+// ── Search memory (chronological fallback) ─────────────────────────────────
+export async function searchMemoryRecent(
+  userId: string,
+  limit = 5
+): Promise<any[]> {
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    `SELECT id, user_id, memory_key, content, channel, confidence, created_at
      FROM user_memory
      WHERE user_id = ?
      ORDER BY created_at DESC
      LIMIT ?`,
     [userId, limit]
   );
-  return rows;
+  return serialize(rows);
 }
 
-// Search memory by FULLTEXT relevance
-export async function searchMemoryFulltext(userId: string, query: string, limit = 5) {
-  const [rows] = await pool.execute<any[]>(
-    `SELECT content, channel, confidence, created_at,
-            MATCH(content) AGAINST(? IN NATURAL LANGUAGE MODE) AS relevance
-     FROM user_memory
-     WHERE user_id = ? AND MATCH(content) AGAINST(? IN NATURAL LANGUAGE MODE)
-     ORDER BY relevance DESC
-     LIMIT ?`,
-    [query, userId, query, limit]
-  );
-  return rows;
-}
+// Alias for backwards compatibility
+export const searchMemory = searchMemoryRecent;
 
-// Upsert memory
+// ── Upsert memory ───────────────────────────────────────────────────────────
 export async function upsertMemory(
   userId: string,
   content: string,
   memoryKey?: string,
-  channel: 'text' | 'voice' | 'both' = 'both'
-) {
+  channel: 'text' | 'voice' | 'both' = 'both',
+  confidence = 0.8
+): Promise<void> {
+  const pool = getPool();
   await pool.execute(
-    `INSERT INTO user_memory (user_id, memory_key, content, channel)
-     VALUES (?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE content = VALUES(content), updated_at = NOW()`,
-    [userId, memoryKey || null, content, channel]
+    `INSERT INTO user_memory (user_id, memory_key, content, channel, confidence)
+     VALUES (?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       content = VALUES(content),
+       updated_at = NOW(),
+       confidence = GREATEST(confidence, VALUES(confidence))`,
+    [userId, memoryKey || null, content, channel, confidence]
   );
 
   await pool.execute(
     `INSERT INTO memory_logs (user_id, action, memory_key, new_value, source)
-     VALUES (?, 'upsert', ?, ?, ?)`,
-    [userId, memoryKey || null, content, 'voice-ai']
+     VALUES (?, 'upsert', ?, ?, 'voice-ai')`,
+    [userId, memoryKey || null, content]
   );
 }
 
-// Extract and save new facts
-export async function extractAndSaveMemories(userId: string, userMsg: string, assistantMsg: string) {
-  const messages = [
-    {
-      role: 'system',
-      content: `Extract 0-2 key facts from this conversation to remember.
-Return ONLY a JSON array: [{"key": "...", "fact": "..."}]
-Nothing else. Be concise.`,
-    },
-    { role: 'user', content: `User: ${userMsg}\nAssistant: ${assistantMsg}` },
-  ];
-
-  const res = await groqChat(messages);
-  const text = res.choices?.[0]?.message?.content || '[]';
-
-  try {
-    const facts = JSON.parse(text);
-    for (const f of facts) {
-      await upsertMemory(userId, f.fact, f.key);
-    }
-  } catch {
-    // silently ignore parse errors
-  }
-}
-
-// Log conversation
+// ── Log conversation ────────────────────────────────────────────────────────
 export async function logConversation(
   userId: string,
   channel: 'text' | 'voice',
   role: 'user' | 'assistant',
-  content: string
-) {
+  content: string,
+  metadata?: Record<string, any>
+): Promise<void> {
+  const pool = getPool();
   await pool.execute(
-    `INSERT INTO conversations (user_id, channel, role, content) VALUES (?, ?, ?, ?)`,
-    [userId, channel, role, content]
+    `INSERT INTO conversations (user_id, channel, role, content, metadata)
+     VALUES (?, ?, ?, ?, ?)`,
+    [userId, channel, role, content, metadata ? JSON.stringify(metadata) : null]
   );
 }
 
-export { SYSTEM_PROMPT };
+// ── Get conversation history ────────────────────────────────────────────────
+export async function getConversationHistory(
+  userId: string,
+  channel: 'text' | 'voice' = 'voice',
+  limit = 20
+): Promise<any[]> {
+  const pool = getPool();
+  const [rows] = await pool.execute(
+    `SELECT role, content, created_at
+     FROM conversations
+     WHERE user_id = ? AND channel = ?
+     ORDER BY created_at DESC
+     LIMIT ?`,
+    [userId, channel, limit]
+  );
+  return serialize(rows);
+}
+
+// ── Health check ───────────────────────────────────────────────────────────
+export async function ping(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const pool = getPool();
+    await pool.execute('SELECT 1');
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: err.message };
+  }
+}
