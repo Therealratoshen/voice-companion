@@ -1,10 +1,15 @@
 /**
- * Custom Next.js server + WebSocket
- * - STT: Groq Whisper
- * - LLM: Groq Llama (streaming)
- * - TTS: Edge TTS (Microsoft neural, Indonesian voice)
- * - Memory: TiDB with FULLTEXT search
- * - VAD: Energy-based (client-side)
+ * Voice AI Companion Server — Rina v2
+ *
+ * Voice-first interface to OpenClaw + Groq.
+ * Rina handles the conversational layer; OpenClaw handles agentic tasks.
+ *
+ * Stack:
+ * - STT: Groq Whisper (fast, accurate)
+ * - LLM: OpenClaw (agentic tasks) OR Groq Llama (casual chat)
+ * - TTS: Edge TTS (Microsoft Neural, Indonesian)
+ * - Memory: TiDB (FULLTEXT, persistent across sessions)
+ * - Real-time: WebSocket
  */
 
 const { createServer } = require("http");
@@ -13,17 +18,28 @@ const next = require("next");
 const { WebSocketServer } = require("ws");
 const { randomUUID } = require("crypto");
 
+// ── Config ─────────────────────────────────────────────────────────────────
 const dev = process.env.NODE_ENV !== "production";
 const hostname = "0.0.0.0";
 const port = parseInt(process.env.PORT || "3456", 10);
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+const OPENCLAW_API_URL = process.env.OPENCLAW_API_URL || "http://localhost:8080";
+const OPENCLAW_API_KEY = process.env.OPENCLAW_API_KEY || "";
+const MAX_SESSION_TURNS = 20; // cap session history to prevent memory bloat
+
 const app = next({ dev, hostname, port });
 const handle = app.getRequestHandler();
 
-// ── In-memory session store (in production, use Redis or similar) ───────────
-const sessions = new Map(); // userId → { messages: [], lastActive: Date }
+// ── Memory layer (CommonJS) ─────────────────────────────────────────────────
+const memory = require("./lib/memory.cjs");
 
-// ── Rina Persona System Prompt ──────────────────────────────────────────────
-const SYSTEM_PROMPT = `Kamu "Rina" — asisten suara yang hangat dan teman bicara.
+// ── Session store (in-memory, reset on server restart) ──────────────────────
+// In production: replace with Redis
+const sessions = new Map(); // userId → { messages: [], lastActive, turnCount }
+
+// ── Rina Persona ─────────────────────────────────────────────────────────────
+// This is the conversational layer — warm, Indonesian, memory-aware.
+const RINA_PROMPT = `Kamu "Rina" — asisten suara yang hangat dan teman bicara.
 - Perempuan Indonesia, usia 25-30 tahun
 - Bicara santai tapi nggak berlebihan
 - Jawab 1-3 kalimat, jangan panjang-panjang
@@ -31,14 +47,81 @@ const SYSTEM_PROMPT = `Kamu "Rina" — asisten suara yang hangat dan teman bicar
 - Kalau pengguna terlihat frustrasi, tenangkan dan bantu dengan baik
 - Jangan pernah bilang kamu AI atau robot
 - Pakai bahasa yang natural, seolah-olah ngobrol sama teman
-- Kalau nggak tahu, bilang aja jujur dengan ramah
-- Kalau pengguna menyapa, balas dengan hangat
 - Emoji boleh dipakai tapi wajar-wajar saja, nggak berlebihan`;
 
-const SYSTEM_PROMPT_WITH_CONTEXT = (context) =>
-  `${SYSTEM_PROMPT}\n\nYang kamu tahu tentang pengguna ini:\n${context}\n\nSelalu gunakan konteks di atas dalam responsesmu.`;
+function systemPrompt(context = "") {
+  return context
+    ? `${RINA_PROMPT}\n\nYang kamu tahu tentang pengguna ini:\n${context}\n\nSelalu gunakan konteks di atas.`
+    : RINA_PROMPT;
+}
 
-// ── Groq Streaming LLM ──────────────────────────────────────────────────────
+// ── OpenClaw Integration ────────────────────────────────────────────────────
+/**
+ * Route to OpenClaw if the message needs agentic action.
+ * Falls back to Groq for casual chat.
+ *
+ * Returns { agentic: boolean, messages: [] }
+ */
+async function buildMessagesWithOpenClaw(userId, transcript, sessionMessages) {
+  // Detect if this looks like a task/request (not small talk)
+  const taskKeywords = [
+    "buatkan", "tolong", "bisa nggak", "coba", "jelaskan", "hitung",
+    "tulis", "kerjakan", "selesaikan", "analisa", "bantu", "apa itu",
+    "how to", "build", "write", "make", "create", "help", "can you",
+    "code", "script", "program", "app", "website"
+  ];
+
+  const isTaskIntent = taskKeywords.some(kw =>
+    transcript.toLowerCase().includes(kw)
+  );
+
+  const memories = await memory.searchMemoryFulltext(userId, transcript, 3);
+  const context = memories.length > 0
+    ? memories.map(m => `• ${m.content}`).join("\n")
+    : "";
+
+  const systemMsg = {
+    role: "system",
+    content: context
+      ? `${RINA_PROMPT}\n\nYang kamu tahu tentang pengguna ini:\n${context}`
+      : RINA_PROMPT,
+  };
+
+  const recentHistory = sessionMessages.slice(-MAX_SESSION_TURNS);
+
+  if (isTaskIntent && OPENCLAW_API_KEY) {
+    // Forward to OpenClaw for agentic tasks
+    try {
+      const res = await fetch(`${OPENCLAW_API_URL}/api/chat`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${OPENCLAW_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messages: [systemMsg, ...recentHistory, { role: "user", content: transcript }],
+          stream: false,
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        return { agentic: true, messages: data.messages || [], raw: data };
+      }
+    } catch (err) {
+      console.warn("[OpenClaw] Failed, falling back to Groq:", err.message);
+    }
+  }
+
+  // Fall back to Groq for casual chat or if OpenClaw unavailable
+  return {
+    agentic: false,
+    messages: [systemMsg, ...recentHistory, { role: "user", content: transcript }],
+  };
+}
+
+// ── Groq LLM (streaming) ───────────────────────────────────────────────────
 async function* groqStream(messages) {
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
@@ -47,21 +130,30 @@ async function* groqStream(messages) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+      model: GROQ_MODEL,
       messages,
       stream: true,
+      temperature: 0.7,
     }),
   });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Groq error ${res.status}: ${err}`);
+  }
+
   if (!res.body) return;
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split("\n");
     buffer = lines.pop() || "";
+
     for (const line of lines) {
       if (!line.startsWith("data: ")) continue;
       const data = line.slice(6);
@@ -74,25 +166,34 @@ async function* groqStream(messages) {
   }
 }
 
-// ── Groq Chat (non-streaming — for memory extraction) ────────────────────────
-async function groqChat(messages, model = "llama-3.3-70b-versatile") {
+// ── Groq LLM (non-streaming) ────────────────────────────────────────────────
+async function groqChat(messages, model = GROQ_MODEL) {
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ model, messages, stream: false }),
+    body: JSON.stringify({ model, messages, stream: false, temperature: 0.7 }),
   });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Groq error ${res.status}: ${err}`);
+  }
   return res.json();
 }
 
-// ── Edge TTS (Microsoft neural TTS) ─────────────────────────────────────────
+// ── Edge TTS ────────────────────────────────────────────────────────────────
 function edgeTTS(text, voice = "id-ID-ArdiNeural") {
   return new Promise((resolve, reject) => {
     const { spawn } = require("child_process");
     const tmpMp3 = `/tmp/tts_${randomUUID()}.mp3`;
-    const edge = spawn("edge-tts", ["--text", text, "--voice", voice, "--write-media", tmpMp3]);
+    const edge = spawn("edge-tts", [
+      "--text", text,
+      "--voice", voice,
+      "--write-media", tmpMp3,
+    ]);
     edge.on("close", (code) => {
       if (code !== 0) { reject(new Error(`edge-tts exited ${code}`)); return; }
       try {
@@ -112,148 +213,61 @@ async function groqSTT(audioBuffer) {
   formData.append("file", new Blob([new Uint8Array(audioBuffer)]), "audio.webm");
   formData.append("model", "whisper-large-v3");
   formData.append("response_format", "verbose_json");
-  formData.append("timestamp_granularities[]", "word");
+
   const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
     method: "POST",
     headers: { "Authorization": `Bearer ${process.env.GROQ_API_KEY}` },
     body: formData,
   });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`STT error ${res.status}: ${err}`);
+  }
+
   const data = await res.json();
   return { text: data.text || "", segments: data.segments || [] };
 }
 
-// ── Memory Layer ─────────────────────────────────────────────────────────────
-async function searchMemory(userId, query, limit = 5) {
-  const { default: pool } = await import('./lib/memory.js');
-  const [rows] = await pool.execute(
-    `SELECT content, memory_key, confidence, created_at,
-            MATCH(content) AGAINST(? IN NATURAL LANGUAGE MODE) AS relevance
-     FROM user_memory
-     WHERE user_id = ? AND MATCH(content) AGAINST(? IN NATURAL LANGUAGE MODE)
-     ORDER BY relevance DESC, created_at DESC
-     LIMIT ?`,
-    [query, userId, query, limit]
-  );
-  return rows;
-}
-
-// Fallback: simple chronological memory search
-async function searchMemorySimple(userId, limit = 5) {
-  const { default: pool } = await import('./lib/memory.js');
-  const [rows] = await pool.execute(
-    `SELECT content, memory_key, confidence, created_at
-     FROM user_memory
-     WHERE user_id = ?
-     ORDER BY created_at DESC
-     LIMIT ?`,
-    [userId, limit]
-  );
-  return rows;
-}
-
-async function upsertMemory(userId, content, memoryKey, channel = "both", confidence = 0.8) {
-  const { default: pool } = await import('./lib/memory.js');
-  try {
-    await pool.execute(
-      `INSERT INTO user_memory (user_id, memory_key, content, channel, confidence)
-       VALUES (?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE content = VALUES(content), updated_at = NOW(), confidence = VALUES(confidence)`,
-      [userId, memoryKey || null, content, channel, confidence]
-    );
-    await pool.execute(
-      `INSERT INTO memory_logs (user_id, action, memory_key, new_value, source)
-       VALUES (?, 'upsert', ?, ?, 'voice-ai')`,
-      [userId, memoryKey || null, content]
-    );
-  } catch (err) {
-    console.error("[Memory] upsert error:", err.message);
-  }
-}
-
-async function extractAndSaveMemories(userId, userMsg, assistantMsg) {
+// ── Memory helpers ──────────────────────────────────────────────────────────
+async function extractMemories(userId, userMsg, assistantMsg) {
   const messages = [
     {
       role: "system",
       content: `Ekstrak 0-2 fakta penting dari percakapan ini untuk diingat.
 Wajib RETURN ONLY JSON array: [{"key": "...", "fact": "...", "confidence": 0.0-1.0}]
-Tidak boleh ada teks lain selain JSON. Kalau tidak ada fakta baru, return [].
+Kalau tidak ada fakta baru yang perlu diingat, return [].
 Contoh: [{"key": "nama", "fact": "Nama pengguna adalah Budi", "confidence": 0.9}]`,
     },
-    {
-      role: "user",
-      content: `Pengguna: ${userMsg}\nRina: ${assistantMsg}`,
-    },
+    { role: "user", content: `Pengguna: ${userMsg}\nRina: ${assistantMsg}` },
   ];
 
   try {
     const res = await groqChat(messages);
-    const text = res.choices?.[0]?.message?.content || "[]";
-    // Strip markdown code blocks if present
-    const cleaned = text.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-    const facts = JSON.parse(cleaned);
-    for (const f of facts) {
-      await upsertMemory(userId, f.fact, f.key, "both", f.confidence || 0.8);
-      console.log(`[Memory] Saved: "${f.fact}" (key: ${f.key})`);
-    }
-    return facts.length;
-  } catch (err) {
-    console.error("[Memory] Extraction error:", err.message);
-    return 0;
-  }
-}
-
-async function logConversation(userId, channel, role, content) {
-  const { default: pool } = await import('./lib/memory.js');
-  try {
-    await pool.execute(
-      `INSERT INTO conversations (user_id, channel, role, content) VALUES (?, ?, ?, ?)`,
-      [userId, channel, role, content]
-    );
-  } catch (err) {
-    console.error("[Memory] logConversation error:", err.message);
-  }
-}
-
-async function saveConversationSummary(userId) {
-  const { default: pool } = await import('./lib/memory.js');
-  try {
-    const [rows] = await pool.execute(
-      `SELECT role, content FROM conversations
-       WHERE user_id = ? AND channel = 'voice'
-       ORDER BY created_at DESC LIMIT 20`,
-      [userId]
-    );
-    if (rows.length < 2) return;
-
-    const messages = rows.reverse().map(r => ({
-      role: r.role === "user" ? "user" : "assistant",
-      content: r.content,
-    }));
-
-    const summaryRes = await groqChat([
-      {
-        role: "system",
-        content: `Ringkas percakapan berikut menjadi 2-3 fakta penting tentang preferensi atau konteks pengguna.
-Return ONLY JSON: [{"key": "...", "fact": "...", "confidence": 0.7}]
-Contoh: [{"key": "tema_minat", "fact": "Pengguna tertarik dengan teknologi AI", "confidence": 0.8}]`,
-      },
-      { role: "user", content: JSON.stringify(messages) },
-    ]);
-
-    const text = (summaryRes.choices?.[0]?.message?.content || "[]")
+    const text = (res.choices?.[0]?.message?.content || "[]")
       .replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
     const facts = JSON.parse(text);
+    let saved = 0;
     for (const f of facts) {
-      await upsertMemory(userId, f.fact, f.key, "both", f.confidence || 0.7);
+      await memory.upsertMemory(userId, f.fact, f.key, "both", f.confidence || 0.8);
+      saved++;
     }
-    console.log(`[Memory] Conversation summary: saved ${facts.length} facts`);
+    return saved;
   } catch (err) {
-    console.error("[Memory] Summary error:", err.message);
+    console.warn("[Memory] extractMemories failed:", err.message);
+    return 0;
   }
 }
 
 // ── Voice Session Handler ───────────────────────────────────────────────────
 async function handleVoiceSession(ws, audioBuffer, userId) {
+  let session = sessions.get(userId);
+  if (!session) {
+    session = { messages: [], lastActive: new Date(), turnCount: 0 };
+    sessions.set(userId, session);
+  }
+  session.lastActive = new Date();
+
   try {
     // 1. STT
     const { text: transcript } = await groqSTT(audioBuffer);
@@ -261,64 +275,54 @@ async function handleVoiceSession(ws, audioBuffer, userId) {
 
     if (!transcript || transcript.trim().length < 2) {
       ws.send(JSON.stringify({ type: "transcript", text: "" }));
-      ws.send(JSON.stringify({ type: "llm_word", text: "Hmm, coba lagi?" }));
-      ws.send(JSON.stringify({ type: "llm_done", text: "Hmm, coba lagi?" }));
-      ws.send(JSON.stringify({
-        type: "tts_audio",
-        data: (await edgeTTS("Hmm, coba lagi?", "id-ID-ArdiNeural")).toString("base64"),
-        mimeType: "audio/mpeg"
-      }));
+      const fallback = "Hmm, coba lagi ngomong ya?";
+      ws.send(JSON.stringify({ type: "llm_word", text: fallback }));
+      ws.send(JSON.stringify({ type: "llm_done", text: fallback }));
+      const tts = await edgeTTS(fallback);
+      ws.send(JSON.stringify({ type: "tts_audio", data: tts.toString("base64"), mimeType: "audio/mpeg" }));
       return;
     }
 
-    // Send transcript to client
     ws.send(JSON.stringify({ type: "transcript", text: transcript }));
 
-    // 2. Store in session
-    if (!sessions.has(userId)) sessions.set(userId, { messages: [], lastActive: new Date() });
-    const session = sessions.get(userId);
-    session.messages.push({ role: "user", content: transcript });
-    session.lastActive = new Date();
+    // 2. Build messages (OpenClaw or Groq)
+    const { agentic, messages: llmMessages } = await buildMessagesWithOpenClaw(
+      userId, transcript, session.messages
+    );
 
-    // 3. Memory: search for relevant context
+    if (agentic) {
+      console.log(`[${userId}] Routed to OpenClaw`);
+      ws.send(JSON.stringify({ type: "agent_status", text: "Menghubungi OpenClaw..." }));
+    }
+
+    // 3. Memory: check for relevant context
     let memoryContext = "";
-    let memoriesUsed = [];
     try {
-      const memories = await searchMemory(userId, transcript, 4);
-      if (memories && memories.length > 0) {
+      const memories = await memory.searchMemoryFulltext(userId, transcript, 4);
+      if (memories.length > 0) {
         memoryContext = memories.map(m => `• ${m.content}`).join("\n");
-        memoriesUsed = memories;
-        console.log(`[${userId}] Memory: found ${memories.length} relevant memories`);
-        // Notify client that we're using memory context
         ws.send(JSON.stringify({
           type: "memory_recall",
           count: memories.length,
-          preview: memories.slice(0, 2).map(m => m.content.substring(0, 50) + "...")
+          preview: memories.slice(0, 2).map(m => m.content.substring(0, 60)),
         }));
-      } else {
-        // Fallback: get recent memories
-        const recent = await searchMemorySimple(userId, 3);
-        if (recent && recent.length > 0) {
-          memoryContext = recent.map(m => `• ${m.content}`).join("\n");
-          memoriesUsed = recent;
-          ws.send(JSON.stringify({ type: "memory_recall", count: recent.length, preview: [] }));
-        }
+        console.log(`[${userId}] Memory recall: ${memories.length} facts`);
       }
     } catch (err) {
-      console.warn(`[${userId}] Memory search failed, continuing without context:`, err.message);
+      console.warn(`[${userId}] Memory search failed:`, err.message);
     }
 
-    // 4. Build LLM messages
-    const systemContent = memoryContext
-      ? SYSTEM_PROMPT_WITH_CONTEXT(memoryContext)
-      : SYSTEM_PROMPT;
+    // Inject memory context if not already handled by buildMessagesWithOpenClaw
+    if (memoryContext && !agentic) {
+      const systemMsg = {
+        role: "system",
+        content: `${RINA_PROMPT}\n\nYang kamu tahu tentang pengguna ini:\n${memoryContext}\n\nSelalu gunakan konteks di atas.`,
+      };
+      // Replace system message
+      llmMessages[0] = systemMsg;
+    }
 
-    const llmMessages = [
-      { role: "system", content: systemContent },
-      ...session.messages.slice(-10), // keep last 10 turns for context
-    ];
-
-    // 5. Stream LLM + TTS
+    // 4. Stream LLM + TTS in parallel
     const ttsQueue = [];
     let ttsBusy = false;
 
@@ -327,16 +331,16 @@ async function handleVoiceSession(ws, audioBuffer, userId) {
       ttsBusy = true;
       const text = ttsQueue.shift();
       try {
-        const mp3Data = await edgeTTS(text, "id-ID-ArdiNeural");
+        const mp3Data = await edgeTTS(text);
         ws.send(JSON.stringify({ type: "tts_audio", data: mp3Data.toString("base64"), mimeType: "audio/mpeg" }));
       } catch (e) {
-        console.error("[TTS] Chunk error:", e.message);
+        console.error("[TTS] chunk error:", e.message);
       }
       ttsBusy = false;
       if (ttsQueue.length > 0) processTTSQueue();
     };
 
-    // 6. Stream response
+    // 5. Stream response
     let fullResponse = "";
     let pendingWord = "";
     let ttsBuffer = "";
@@ -347,12 +351,12 @@ async function handleVoiceSession(ws, audioBuffer, userId) {
       ttsBuffer += chunk;
 
       // Send word to UI
-      if (chunk.match(/[\s.,!?]/)) {
+      if (chunk.match(/[\s.,!?\n]/)) {
         ws.send(JSON.stringify({ type: "llm_word", text: pendingWord.trim() }));
         pendingWord = "";
       }
 
-      // TTS every ~30 chars
+      // TTS every ~30 accumulated chars
       while (ttsBuffer.length >= 30) {
         const cut = ttsBuffer.lastIndexOf(" ");
         if (cut <= 0) break;
@@ -362,63 +366,130 @@ async function handleVoiceSession(ws, audioBuffer, userId) {
       }
       processTTSQueue();
     }
+
     if (pendingWord) {
       ws.send(JSON.stringify({ type: "llm_word", text: pendingWord.trim() }));
       ttsBuffer += pendingWord;
     }
     if (ttsBuffer.trim()) ttsQueue.push(ttsBuffer.trim());
 
-    // Drain TTS queue
+    // Drain remaining TTS
     while (ttsQueue.length > 0) {
       await new Promise((r) => setTimeout(r, 100));
       await processTTSQueue();
     }
 
-    // 7. Store AI response in session
-    session.messages.push({ role: "assistant", content: fullResponse.trim() });
+    const response = fullResponse.trim() || "Maaf, saya kurang menangkap itu.";
+    ws.send(JSON.stringify({ type: "llm_done", text: response }));
 
-    // 8. Log to TiDB
-    await logConversation(userId, "voice", "user", transcript);
-    await logConversation(userId, "voice", "assistant", fullResponse.trim());
+    // 6. Update session
+    session.messages.push({ role: "user", content: transcript });
+    session.messages.push({ role: "assistant", content: response });
+    session.turnCount++;
 
-    // 9. Extract + save new memories
-    const savedCount = await extractAndSaveMemories(userId, transcript, fullResponse.trim());
+    // Cap session history
+    if (session.messages.length > MAX_SESSION_TURNS * 2) {
+      session.messages = session.messages.slice(-MAX_SESSION_TURNS * 2);
+    }
+
+    // 7. Log to TiDB
+    await memory.logConversation(userId, "voice", "user", transcript);
+    await memory.logConversation(userId, "voice", "assistant", response);
+
+    // 8. Extract + save memories
+    const savedCount = await extractMemories(userId, transcript, response);
     if (savedCount > 0) {
       ws.send(JSON.stringify({ type: "memory_saved", count: savedCount }));
     }
 
-    // 10. Periodic conversation summary (every 10 turns)
-    if (session.messages.length % 10 === 0 && session.messages.length > 0) {
-      saveConversationSummary(userId).catch(() => {});
+    // 9. Periodic summary every 15 turns
+    if (session.turnCount > 0 && session.turnCount % 15 === 0) {
+      summarizeSession(userId, session).catch(console.error);
     }
 
-    ws.send(JSON.stringify({ type: "llm_done", text: fullResponse.trim() || "Maaf, saya kurang menangkap itu." }));
-    console.log(`[${userId}] Session: ${session.messages.length} turns, memory saved: ${savedCount}`);
+    console.log(`[${userId}] Turn ${session.turnCount} done. Memory saved: ${savedCount}`);
 
   } catch (err) {
     console.error(`[${userId}] Session error:`, err);
-    ws.send(JSON.stringify({ type: "error", message: err.message || "Terjadi kesalahan" }));
+    const errorMsg = "Maaf, terjadi kesalahan. Coba lagi ya.";
+    ws.send(JSON.stringify({ type: "error", message: err.message }));
+    ws.send(JSON.stringify({ type: "llm_word", text: errorMsg }));
+    ws.send(JSON.stringify({ type: "llm_done", text: errorMsg }));
+    try {
+      const tts = await edgeTTS(errorMsg);
+      ws.send(JSON.stringify({ type: "tts_audio", data: tts.toString("base64"), mimeType: "audio/mpeg" }));
+    } catch {}
+  }
+}
+
+async function summarizeSession(userId, session) {
+  try {
+    const history = await memory.getConversationHistory(userId, "voice", 30);
+    if (history.length < 4) return;
+
+    const messages = [
+      {
+        role: "system",
+        content: `Ringkas percakapan berikut menjadi 2-3 fakta penting tentang preferensi atau konteks pengguna.
+Return ONLY JSON: [{"key": "...", "fact": "...", "confidence": 0.7}]
+Contoh: [{"key": "tema_minat", "fact": "Pengguna tertarik dengan teknologi AI", "confidence": 0.8}]`,
+      },
+      { role: "user", content: JSON.stringify(history) },
+    ];
+
+    const res = await groqChat(messages);
+    const text = (res.choices?.[0]?.message?.content || "[]")
+      .replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+    const facts = JSON.parse(text);
+    for (const f of facts) {
+      await memory.upsertMemory(userId, f.fact, f.key, "both", f.confidence || 0.7);
+    }
+    console.log(`[${userId}] Session summary: saved ${facts.length} facts`);
+  } catch (err) {
+    console.warn(`[${userId}] summarizeSession failed:`, err.message);
   }
 }
 
 // ── Boot ────────────────────────────────────────────────────────────────────
-app.prepare().then(() => {
+app.prepare().then(async () => {
+  // Test memory connection on startup
+  const memPing = await memory.ping();
+  if (memPing.ok) {
+    console.log("> TiDB: connected");
+  } else {
+    console.warn("> TiDB: not connected —", memPing.error);
+    console.warn("> Memory features will be disabled until TiDB is configured.");
+  }
+
   const server = createServer(async (req, res) => {
     try {
       const parsedUrl = parse(req.url, true);
 
+      // GET /test_audio — test TTS
       if (parsedUrl.pathname === "/test_audio") {
-        res.setHeader("Content-Type", "audio/mpeg");
-        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.writeHead(200, {
+          "Content-Type": "audio/mpeg",
+          "Access-Control-Allow-Origin": "*",
+        });
         try {
-          const mp3Buffer = await edgeTTS("Halo! Aku Rina. Dengan siapa ya?", "id-ID-ArdiNeural");
-          res.writeHead(200, { "Content-Type": "audio/mpeg" });
-          res.end(mp3Buffer);
+          const mp3 = await edgeTTS("Halo! Aku Rina. Dengan siapa ya?", "id-ID-ArdiNeural");
+          res.end(mp3);
         } catch (e) {
-          console.error("[/test_audio] error:", e.message);
           res.writeHead(500);
           res.end("TTS error: " + e.message);
         }
+        return;
+      }
+
+      // GET /health — health check
+      if (parsedUrl.pathname === "/health") {
+        const memPing = await memory.ping();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          status: "ok",
+          memory: memPing,
+          uptime: process.uptime(),
+        }));
         return;
       }
 
@@ -432,11 +503,10 @@ app.prepare().then(() => {
 
   const wss = new WebSocketServer({ noServer: true });
 
-  wss.on("connection", (ws) => {
-    // User ID from query param, default to guest
-    const url = new URL(`http://localhost${ws.upgradeReq?.url || ""}`);
-    const userId = url.searchParams.get("userId") || `guest_${randomUUID().slice(0, 8)}`;
-    console.log(`[WS] Client connected: ${userId}`);
+  wss.on("connection", (ws, req) => {
+    const parsedUrl = parse(req.url, true);
+    const userId = parsedUrl.query.userId || `guest_${randomUUID().slice(0, 8)}`;
+    console.log(`[WS] + ${userId}`);
 
     ws.on("message", async (data) => {
       try {
@@ -446,32 +516,30 @@ app.prepare().then(() => {
           await handleVoiceSession(ws, audioBuffer, userId);
         }
       } catch (err) {
-        console.error("[WS] Message error:", err);
+        console.error("[WS] message error:", err);
         ws.send(JSON.stringify({ type: "error", message: "Processing error" }));
       }
     });
 
-    ws.on("close", () => {
-      console.log(`[WS] Client disconnected: ${userId}`);
-    });
-    ws.on("error", (err) => console.error("[WS] Error:", err));
+    ws.on("close", () => console.log(`[WS] - ${userId}`));
+    ws.on("error", (err) => console.error(`[WS] ${userId} error:`, err.message));
   });
 
   server.on("upgrade", (req, socket, head) => {
     const { pathname } = parse(req.url);
     if (pathname === "/ws" || pathname === "/api/voice/ws") {
-      wss.handleUpgrade(req, socket, head, (ws) => {
-        wss.emit("connection", ws, req);
-      });
+      wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
     } else {
       socket.destroy();
     }
   });
 
   server.listen(port, hostname, () => {
-    console.log(`\n> Voice Companion ready on http://${hostname}:${port}`);
+    console.log(`\n> Rina v2 ready on http://${hostname}:${port}/voice`);
     console.log(`> WebSocket: ws://${hostname}:${port}/ws`);
-    console.log(`> Memory: TiDB FULLTEXT (set TIDB_* env vars)`);
-    console.log(`> TTS: Edge TTS id-ID-ArdiNeural (Microsoft Neural)\n`);
+    console.log(`> Health: http://${hostname}:${port}/health`);
+    console.log(`> TTS: Edge id-ID-ArdiNeural`);
+    console.log(`> LLM: ${GROQ_MODEL} (Groq)`);
+    console.log(`> OpenClaw: ${OPENCLAW_API_URL}${OPENCLAW_API_KEY ? " [connected]" : " [not configured]"}\n`);
   });
 });
