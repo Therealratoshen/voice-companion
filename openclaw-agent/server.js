@@ -12,7 +12,7 @@ require('dotenv').config();
 
 const express = require('express');
 const cors = require('cors');
-const { runAgent, TOOLS } = require('./lib/agent');
+const { runAgent, TOOLS, postProcess } = require('./lib/agent');
 const { startCleanup } = require('./lib/functions/reminders');
 const { ping: memPing } = require('./lib/memory/tidb_mem9');
 const { groqChat } = require('./lib/groq');
@@ -86,11 +86,17 @@ app.post('/api/chat', async (req, res) => {
 
   try {
     const result = await runAgent(userId, message, history);
+
+    // Post-process: extract profile facts, detect habits
+    postProcess(userId, message, result.response).catch(console.error);
+
     console.log(`[Chat] ${userId} → "${result.response.substring(0, 100)}" (${result.toolCalls.length} tools)`);
+    console.log(`[Chat] Proactive: ${result.proactive || 'none'}`);
 
     res.json({
       userId,
       response: result.response,
+      proactive: result.proactive || null,
       toolCalls: result.toolCalls.map(c => ({ tool: c.tool, args: c.args })),
       timestamp: new Date().toISOString(),
     });
@@ -123,6 +129,9 @@ app.post('/api/chat/stream', async (req, res) => {
 
   try {
     const result = await runAgent(userId, message, history);
+
+    // Post-process (async, don't wait)
+    postProcess(userId, message, result.response).catch(console.error);
 
     // Stream word by word
     const words = result.response.split(' ');

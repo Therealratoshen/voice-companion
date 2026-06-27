@@ -68,6 +68,7 @@ export default function VoicePage() {
   const [waveAmplitude, setWaveAmplitude] = useState(0);
   const [skillStatus, setSkillStatus] = useState<SkillStatus>(null);
   const [isConfirming, setIsConfirming] = useState(false);
+  const [proactiveSuggestion, setProactiveSuggestion] = useState<string | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -177,6 +178,10 @@ export default function VoicePage() {
           { type: "saved", count: msg.count }
         ]);
         setTimeout(() => setMemoryEvents((prev) => prev.filter((e) => !(e.type === "saved" && e.count === msg.count))), 3500);
+      }
+      else if (msg.type === "proactive" && msg.text) {
+        setProactiveSuggestion(msg.text);
+        setTimeout(() => setProactiveSuggestion(null), 6000);
       }
       else if (msg.type === "skill_status") {
         setSkillStatus({ name: msg.name, status: msg.status, tools: msg.tools });
@@ -513,6 +518,17 @@ export default function VoicePage() {
       {error && (
         <div className="mx-4 mb-2 bg-red-900/40 border border-red-800/50 rounded-xl px-4 py-2.5 text-red-300 text-xs">
           {error}
+        </div>
+      )}
+
+      {/* Proactive suggestion */}
+      {proactiveSuggestion && (
+        <div className="mx-4 mb-2 bg-violet-900/40 border border-violet-600/40 rounded-xl px-4 py-2.5 text-violet-200 text-xs flex items-start gap-2">
+          <span className="text-base">💡</span>
+          <div>
+            <span className="font-semibold block mb-0.5">NewMe</span>
+            <span>{proactiveSuggestion}</span>
+          </div>
         </div>
       )}
 

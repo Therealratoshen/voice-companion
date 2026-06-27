@@ -1,413 +1,421 @@
 /**
- * OpenClaw Function Calling Agent
+ * NewMe Agent v2 — Jarvis-style AI Partner
  *
- * Orchestrates the full agentic loop:
- * 1. LLM decides if a tool is needed
- * 2. Execute tool, get result
- * 3. Continue with result, repeat if needed
- * 4. Return final response
+ * Multi-step reasoning agent with:
+ * - Deep persona (Jarvis-inspired)
+ * - User profile + goal tracking
+ * - Proactive suggestion engine
+ * - Tool calling (Groq as reasoning engine)
  *
- * Uses Groq with tool-calling via structured prompting
- * (Groq doesn't support native function calling, so we use a
- *  structured output approach: LLM outputs JSON tool calls)
+ * NOT a chatbot. A thinking partner who:
+ * 1. Understands what user actually needs
+ * 2. Plans before acting
+ * 3. Remembers everything
+ * 4. Proactively helps
  */
 
-const { webSearch, formatForLLM } = require("./functions/web_search");
-const { executeCode, extractCode, detectLanguage } = require("./functions/code_executor");
-const { createReminder, listReminders, cancelReminder } = require("./functions/reminders");
-const { vectorSearch, upsertMemoryWithEmbedding } = require("./memory/tidb_mem9");
-const { groqChat, groqStream } = require("./groq");
+const { groqChat } = require('./groq');
+const { webSearch, formatForLLM } = require('./functions/web_search');
+const { executeCode, extractCode, detectLanguage } = require('./functions/code_executor');
+const { createReminder, listReminders, cancelReminder } = require('./functions/reminders');
+const { vectorSearch } = require('./memory/tidb_mem9');
+const {
+  buildSystemPrompt,
+  buildReasoningPrompt,
+  goalTracker,
+  generateSuggestions,
+} = require('./persona');
+const {
+  getProfile,
+  extractProfileFacts,
+  addGoal,
+  getActiveGoals,
+  updateGoalStep,
+  completeGoal,
+  detectHabits,
+  buildProfileContext,
+} = require('./user_profile');
 
-const MAX_TOOL_CALLS = 5;
-const MAX_HISTORY = 20;
+const MAX_TOOL_CALLS = 6;
+const REASONING_MODEL = 'llama-3.3-70b-versatile';
 
-// ── Tool Definitions ─────────────────────────────────────────────────────────
+// ── Tool registry ─────────────────────────────────────────────────────────
 const TOOLS = [
   {
-    name: "web_search",
-    description: "Cari informasi di internet. Gunakan untuk pertanyaan tentang berita, fakta, harga, cuaca, atau topik yang membutuhkan informasi terkini.",
+    name: 'web_search',
+    description: 'Cari informasi di internet untuk berita, fakta terkini, cuaca, harga.',
     parameters: {
-      type: "object",
+      type: 'object',
       properties: {
-        query: {
-          type: "string",
-          description: "Query pencarian dalam Bahasa Indonesia atau Inggris. Buat spesifik untuk hasil terbaik.",
-        },
+        query: { type: 'string', description: 'Query pencarian spesifik' },
       },
-      required: ["query"],
+      required: ['query'],
     },
   },
   {
-    name: "execute_code",
-    description: "Jalankan kode JavaScript atau Python. Gunakan untuk kalkulasi, manipulasi data, atau menghasilkan output berdasarkan logika.",
+    name: 'execute_code',
+    description: 'Jalankan JavaScript untuk kalkulasi, generate code, atau data processing.',
     parameters: {
-      type: "object",
+      type: 'object',
       properties: {
-        code: {
-          type: "string",
-          description: "Kode yang akan dijalankan. Untuk JavaScript atau Python.",
-        },
-        language: {
-          type: "string",
-          description: "Bahasa pemrograman: 'javascript' atau 'python'. Default: javascript.",
-          enum: ["javascript", "python"],
-        },
+        code: { type: 'string', description: 'JavaScript code' },
+        language: { type: 'string', description: 'javascript atau python', default: 'javascript' },
       },
-      required: ["code"],
+      required: ['code'],
     },
   },
   {
-    name: "create_reminder",
-    description: "Buat pengingat untuk di masa depan. Parse waktu dari deskripsi natural language Indonesia.",
+    name: 'create_reminder',
+    description: 'Buat pengingat untuk masa depan.',
     parameters: {
-      type: "object",
+      type: 'object',
       properties: {
-        userId: {
-          type: "string",
-          description: "ID pengguna untuk pengingat ini.",
-        },
-        text: {
-          type: "string",
-          description: "Deskripsi lengkap termasuk waktu dan isi pengingat. Contoh: 'Ingatkan saya jam 3 sore untuk meeting dengan Budi'",
-        },
+        userId: { type: 'string' },
+        text: { type: 'string', description: 'Deskripsi: "Ingatkan aku jam 3 sore untuk..."' },
       },
-      required: ["userId", "text"],
+      required: ['userId', 'text'],
     },
   },
   {
-    name: "list_reminders",
-    description: "Lihat semua pengingat aktif milik pengguna.",
+    name: 'list_reminders',
+    description: 'Lihat semua pengingat aktif.',
     parameters: {
-      type: "object",
+      type: 'object',
       properties: {
-        userId: {
-          type: "string",
-          description: "ID pengguna",
-        },
+        userId: { type: 'string' },
       },
-      required: ["userId"],
+      required: ['userId'],
     },
   },
   {
-    name: "cancel_reminder",
-    description: "Batalkan pengingat yang sudah ada.",
+    name: 'cancel_reminder',
+    description: 'Batalkan pengingat.',
     parameters: {
-      type: "object",
+      type: 'object',
       properties: {
-        userId: {
-          type: "string",
-          description: "ID pengguna",
-        },
-        reminderId: {
-          type: "string",
-          description: "ID pengingat yang akan dibatalkan",
-        },
+        userId: { type: 'string' },
+        reminderId: { type: 'string' },
       },
-      required: ["userId", "reminderId"],
+      required: ['userId', 'reminderId'],
     },
   },
   {
-    name: "search_memory",
-    description: "Cari memori pengguna di database. Gunakan untuk mengingat preferensi, fakta, atau konteks dari percakapan sebelumnya.",
+    name: 'search_memory',
+    description: 'Cari info dari percakapan sebelumnya.',
     parameters: {
-      type: "object",
+      type: 'object',
       properties: {
-        userId: {
-          type: "string",
-          description: "ID pengguna",
-        },
-        query: {
-          type: "string",
-          description: "Query untuk mencari memori yang relevan.",
-        },
-        limit: {
-          type: "number",
-          description: "Jumlah maksimal hasil. Default: 5.",
-          default: 5,
-        },
+        userId: { type: 'string' },
+        query: { type: 'string', description: 'Keyword atau concept untuk dicari' },
+        limit: { type: 'number', default: 5 },
       },
-      required: ["userId", "query"],
+      required: ['userId', 'query'],
     },
   },
   {
-    name: "remember_fact",
-    description: "Simpan fakta baru ke memori pengguna. Panggil ini setelah percakapan mengandung informasi penting tentang pengguna.",
+    name: 'remember_fact',
+    description: 'Simpan fakta penting tentang user.',
     parameters: {
-      type: "object",
+      type: 'object',
       properties: {
-        userId: {
-          type: "string",
-          description: "ID pengguna",
-        },
-        content: {
-          type: "string",
-          description: "Fakta yang akan disimpan. Buat deskriptif dan actionable.",
-        },
-        key: {
-          type: "string",
-          description: "Kunci unik untuk fakta ini. Gunakan format 'category_name'.",
-        },
+        userId: { type: 'string' },
+        content: { type: 'string', description: 'Fakta yang akan diingat' },
+        key: { type: 'string' },
       },
-      required: ["userId", "content"],
+      required: ['userId', 'content'],
     },
   },
   {
-    name: "done",
-    description: "Tandakan bahwa tugas sudah selesai dan berikan jawaban akhir ke pengguna. WAJIB dipanggil di akhir setiap percakapan.",
+    name: 'add_goal',
+    description: 'Tambahkan goal baru untuk di-track progressnya.',
     parameters: {
-      type: "object",
+      type: 'object',
       properties: {
-        response: {
-          type: "string",
-          description: "Jawaban akhir untuk pengguna dalam Bahasa Indonesia yang natural.",
-        },
+        userId: { type: 'string' },
+        title: { type: 'string' },
+        steps: { type: 'array', items: { type: 'string' } },
+        deadline: { type: 'string' },
       },
-      required: ["response"],
+      required: ['userId', 'title'],
+    },
+  },
+  {
+    name: 'continue_goal',
+    description: 'Lanjut ke langkah berikutnya dari goal aktif.',
+    parameters: {
+      type: 'object',
+      properties: {
+        userId: { type: 'string' },
+        goalId: { type: 'string' },
+      },
+      required: ['userId', 'goalId'],
+    },
+  },
+  {
+    name: 'done',
+    description: 'SELESAI. Panggil di akhir setiap conversation turn. WAJIB.',
+    parameters: {
+      type: 'object',
+      properties: {
+        response: { type: 'string', description: 'Jawaban final ke user dalam Bahasa Indonesia natural' },
+        proactive: { type: 'string', description: 'Optional: proactive suggestion untuk next step' },
+      },
+      required: ['response'],
     },
   },
 ];
 
-// ── System prompt ─────────────────────────────────────────────────────────
-const AGENT_SYSTEM_PROMPT = `Kamu adalah asisten AI yang sangat helpful. Kamu memiliki akses ke berbagai tools untuk membantu pengguna.
-
-ALUR KERJA:
-1. Pahami pertanyaan pengguna
-2. Tentukan apakah perlu memanggil tool
-3. Jika perlu, panggil tool yang sesuai
-4. Baca hasil tool
-5. Ulangi sampai kamu bisa menjawab
-6. Selalu panggil tool "done" di akhir
-
-PRINSIP:
-- Bahasa Indonesia untuk semua output ke pengguna
-- Bahasa Indonesia atau Inggris untuk tool calls (sesuai input pengguna)
-- Kalau butuh informasi terkini → web_search
-- Kalau butuh kalkulasi → execute_code
-- Kalau pengguna minta diingatkan sesuatu → create_reminder
-- Kalau pengguna tanya tentang preferensi/masa lalu → search_memory
-- Selalu panggil done() di akhir
-
-FORMAT TOOL CALL (JSON):
-\`\`\`json
-{"tool": "nama_tool", "args": {"param1": "nilai1", "param2": "nilai2"}}
-\`\`\`
-
-Contoh:
-Pengguna: "Cari berita tentang AI hari ini"
-Tool call:
-\`\`\`json
-{"tool": "web_search", "args": {"query": "artificial intelligence news today 2024"}}
-\`\`\`
-
-Pengguna: "Hitung 15% dari 2500000"
-Tool call:
-\`\`\`json
-{"tool": "execute_code", "args": {"code": "const result = 2500000 * 0.15; console.log(result);", "language": "javascript"}}
-\`\`\`
-
-Pengguna: "Ingatkan saya jam 3 sore untuk meeting"
-Tool call:
-\`\`\`json
-{"tool": "create_reminder", "args": {"userId": "user_001", "text": "Ingatkan saya jam 3 sore untuk meeting"}}
-\`\`\``;
-
-// ── Execute tools ──────────────────────────────────────────────────────────
+// ── Tool executor ──────────────────────────────────────────────────────────
 async function executeTool(name, args) {
-  console.log(`[Agent] Tool call: ${name}`, JSON.stringify(args).substring(0, 100));
+  console.log(`[Agent] Tool: ${name}`, JSON.stringify(args).substring(0, 120));
 
   try {
     switch (name) {
-      case "web_search": {
+      case 'web_search': {
         const { query } = args;
-        const { success, results, error } = await webSearch(query);
-        if (!success || results.length === 0) {
-          return `Pencarian gagal: ${error || "tidak ada hasil"}. Coba kata kunci yang berbeda.`;
-        }
-        return formatForLLM(results, query);
+        const result = await webSearch(query);
+        if (!result.success) return `Pencarian gagal: ${result.error}`;
+        return formatForLLM(result.results, query);
       }
 
-      case "execute_code": {
-        const code = extractCode(args.code || args.code_string || "");
-        const language = args.language || detectLanguage(code);
-        const result = await executeCode(code, language);
-        if (!result.success) {
-          return `Error: ${result.error}\n\nLogs:\n${result.logs?.join("\n") || "none"}`;
-        }
-        return `Hasil:\n${result.result}\n${result.logs?.length ? "\nLogs:\n" + result.logs.join("\n") : ""}`;
+      case 'execute_code': {
+        const code = extractCode(args.code || '');
+        const lang = args.language || detectLanguage(code);
+        const result = await executeCode(code, lang);
+        if (!result.success) return `Error: ${result.error}`;
+        return `Hasil:\n${result.result}`;
       }
 
-      case "create_reminder": {
+      case 'create_reminder': {
         const { userId, text } = args;
         const result = createReminder(userId, text);
         if (!result.success) return `Gagal: ${result.error}`;
-        return `Pengingat dibuat! Saya akan mengingatkan Anda ${result.reminder.in} untuk: "${result.reminder.text}"`;
+        return `Pengingat dibuat! "${result.reminder.text}" — ${result.reminder.in}`;
       }
 
-      case "list_reminders": {
+      case 'list_reminders': {
         const { userId } = args;
         const reminders = listReminders(userId);
-        if (reminders.length === 0) return "Tidak ada pengingat aktif.";
-        return "Pengingat aktif Anda:\n" + reminders.map(r =>
-          `• ${r.text} (${r.in}) — ID: ${r.id}`
-        ).join("\n");
+        if (!reminders.length) return 'Tidak ada pengingat aktif.';
+        return 'Pengingat aktif:\n' + reminders.map(r =>
+          `${r.id}: "${r.text}" (${r.in})`
+        ).join('\n');
       }
 
-      case "cancel_reminder": {
+      case 'cancel_reminder': {
         const { userId, reminderId } = args;
         const result = cancelReminder(userId, reminderId);
-        return result.success ? "Pengingat dibatalkan." : `Gagal: ${result.error}`;
+        return result.success ? 'Pengingat dibatalkan.' : `Gagal: ${result.error}`;
       }
 
-      case "search_memory": {
+      case 'search_memory': {
         const { userId, query, limit = 5 } = args;
         const memories = await vectorSearch(userId, query, limit);
-        if (memories.length === 0) return "Tidak ada memori yang ditemukan untuk query ini.";
-        return "Yang saya ingat:\n" + memories.map(m =>
-          `• ${m.content} (similarity: ${(m.similarity * 100).toFixed(0)}%)`
-        ).join("\n");
+        if (!memories.length) return 'Tidak ada yang ingat untuk query ini.';
+        return 'Yang aku ingat:\n' + memories.map(m =>
+          `• ${m.content} (${(m.similarity * 100).toFixed(0)}% match)`
+        ).join('\n');
       }
 
-      case "remember_fact": {
+      case 'remember_fact': {
         const { userId, content, key } = args;
+        // Use tidb_mem9 directly for embedding
+        const { upsertMemoryWithEmbedding } = require('./memory/tidb_mem9');
         const result = await upsertMemoryWithEmbedding(userId, content, key);
-        return result.success
-          ? `Tersimpan! Saya akan mengingat: "${content}"`
-          : `Gagal menyimpan: ${result.error}`;
+        return result.success ? `Tersimpan! "${content}"` : `Gagal menyimpan: ${result.error}`;
       }
 
-      case "done": {
-        return "__DONE__" + (args.response || "");
+      case 'add_goal': {
+        const { userId, title, steps = [], deadline } = args;
+        const goal = await addGoal(userId, { title, steps, deadline });
+        const stepsText = steps.length > 0
+          ? `\nLangkah-langkah:\n${steps.map((s, i) => `${i + 1}. ${s}`).join('\n')}`
+          : '';
+        return `Goal ditambahkan! 🎯 "${title}"${stepsText}`;
+      }
+
+      case 'continue_goal': {
+        const { userId, goalId } = args;
+        const goals = await getActiveGoals(userId);
+        const goal = goals.find(g => g.id === goalId);
+        if (!goal) return 'Goal tidak ditemukan.';
+        const nextStep = goal.steps[goal.currentStep];
+        if (!nextStep) {
+          await completeGoal(userId, goalId);
+          return `Semua langkah "${goal.title}" sudah selesai! 🎉`;
+        }
+        await updateGoalStep(userId, goalId, goal.currentStep + 1);
+        return `Langkah ${goal.currentStep + 1}/${goal.steps.length} dari "${goal.title}":\n${nextStep}`;
+      }
+
+      case 'done': {
+        return '__DONE__' + JSON.stringify({ response: args.response, proactive: args.proactive });
       }
 
       default:
         return `Tool tidak dikenal: ${name}`;
     }
   } catch (err) {
-    console.error(`[Agent] Tool error (${name}):`, err);
+    console.error(`[Agent] Tool ${name} error:`, err.message);
     return `Error executing ${name}: ${err.message}`;
   }
 }
 
-// ── Parse tool calls from LLM output ───────────────────────────────────────
+// ── Parse tool calls ───────────────────────────────────────────────────────
 function parseToolCalls(text) {
   const calls = [];
-  // Match ```json blocks
   const jsonBlocks = text.match(/```json\n?([\s\S]*?)```/g) || [];
   for (const block of jsonBlocks) {
     try {
-      const parsed = JSON.parse(block.replace(/```json\n?/, "").replace(/```/, ""));
-      if (parsed.tool && parsed.args) {
-        calls.push(parsed);
-      } else if (Array.isArray(parsed)) {
-        for (const item of parsed) {
-          if (item.tool && item.args) calls.push(item);
-        }
-      }
+      const parsed = JSON.parse(block.replace(/```json\n?/, '').replace(/```/, ''));
+      if (parsed.tool && parsed.args) calls.push(parsed);
+      if (Array.isArray(parsed)) parsed.forEach(item => {
+        if (item.tool && item.args) calls.push(item);
+      });
     } catch {}
   }
+
+  // Also try plain JSON objects
+  if (calls.length === 0) {
+    const matches = text.match(/\{[^{}]*"tool"[^{}]*"args"[^{}]*\}/g) || [];
+    for (const match of matches) {
+      try {
+        const parsed = JSON.parse(match);
+        if (parsed.tool && parsed.args) calls.push(parsed);
+      } catch {}
+    }
+  }
+
   return calls;
 }
 
-// ── Main agent loop ─────────────────────────────────────────────────────────
-/**
- * Run the full agent loop for a user message.
- * @param {string} userId - User ID
- * @param {string} message - User message
- * @param {Array} history - Previous messages [{role, content}]
- * @returns {Promise<{response: string, toolCalls: Array}>}
- */
+// ── Main agent ─────────────────────────────────────────────────────────────
 async function runAgent(userId, message, history = []) {
   const toolCalls = [];
+  const profile = await getProfile(userId);
+  const activeGoals = await getActiveGoals(userId);
+  const profileContext = await buildProfileContext(userId);
+  const memories = await vectorSearch(userId, message, 3);
 
-  // Build messages
-  const systemMsg = {
-    role: "system",
-    content: AGENT_SYSTEM_PROMPT + `\n\nUSER_ID: ${userId}\nSelalu gunakan userId ini untuk tool calls yang membutuhkan.`
-  };
+  // Build memory context
+  const memoryContext = memories.length > 0
+    ? '\nMEMORI RELEVAN:\n' + memories.map(m => `• ${m.content}`).join('\n')
+    : '';
 
-  // Add memory context first
-  let memoryContext = "";
-  try {
-    const memories = await vectorSearch(userId, message, 3);
-    if (memories.length > 0) {
-      memoryContext = "\n\nMEMORI TENTANG PENGGUNA:\n" + memories.map(m =>
-        `• ${m.content} (confidence: ${(m.confidence * 100).toFixed(0)}%)`
-      ).join("\n");
-    }
-  } catch {}
-
-  const contextMsg = memoryContext ? {
-    role: "system",
-    content: memoryContext,
-  } : null;
+  // Build system prompt with full context
+  const systemPrompt = buildSystemPrompt(
+    profile,
+    history.slice(-10),
+    activeGoals.map(g => `"${g.title}" — langkah ${g.currentStep + 1}/${g.steps.length}`)
+  );
 
   const messages = [
-    systemMsg,
-    ...(contextMsg ? [contextMsg] : []),
-    ...history.slice(-MAX_HISTORY),
-    { role: "user", content: message },
+    { role: 'system', content: systemPrompt },
+    ...history.slice(-15).map(m => ({ role: m.role, content: m.content })),
+    { role: 'user', content: message },
   ];
 
-  // Main loop: LLM → tool calls → execute → repeat
+  // Step 1: REASONING — understand before acting
+  const reasoningPrompt = buildReasoningPrompt(
+    `User message: ${message}\n\nProfile context:\n${profileContext}${memoryContext}\n\nActive goals: ${activeGoals.length > 0 ? activeGoals.map(g => `"${g.title}" (${g.currentStep + 1}/${g.steps.length}): ${g.steps[g.currentStep] || 'completed'}`).join('\n') : 'None'}`
+  );
+
+  const reasoningMessages = [
+    { role: 'system', content: 'Kamu NewMe. PIKIR sebelum bertindak. Use tool calls untuk setiap action yang dibutuhkan.' },
+    { role: 'user', content: reasoningPrompt },
+  ];
+
+  const reasoningRes = await groqChat(reasoningMessages, { model: REASONING_MODEL, temperature: 0.3 });
+  const reasoning = reasoningRes.choices?.[0]?.message?.content || '';
+  console.log(`[Agent] ${userId} reasoning: "${reasoning.substring(0, 80)}..."`);
+
+  // Step 2: Tool calling loop
   for (let i = 0; i < MAX_TOOL_CALLS; i++) {
-    const response = await groqChat(messages);
+    const llmRes = await groqChat(messages, { model: REASONING_MODEL, temperature: 0.6 });
+    const content = llmRes.choices?.[0]?.message?.content || '';
 
-    const content = response.choices?.[0]?.message?.content || "";
-    if (!content.trim()) {
-      messages.push({ role: "assistant", content: "" });
-      break;
-    }
+    if (!content.trim()) break;
 
-    messages.push({ role: "assistant", content });
+    messages.push({ role: 'assistant', content });
 
     const calls = parseToolCalls(content);
     if (calls.length === 0) {
-      // No tool call detected — assume this is the final response
-      // Check if there's a natural done intent
-      if (content.toLowerCase().includes("__done__")) {
-        return { response: content.replace(/__done__/gi, "").trim(), toolCalls };
+      // No tool call — this might be a direct response. Check for done.
+      if (content.toLowerCase().includes('__done__') || content.includes('done()')) {
+        const doneMatch = content.match(/done\s*\(\s*\{[^}]*response\s*:\s*"([^"]+)"/);
+        if (doneMatch) {
+          return parseDoneResult(doneMatch[1], toolCalls);
+        }
       }
-      // Treat as final response
-      return { response: content.trim(), toolCalls };
+      // Check if response is done without explicit tool call
+      if (i > 0 || content.length > 20) {
+        return { response: content.trim(), toolCalls, reasoning };
+      }
+      continue;
     }
 
     for (const call of calls) {
       toolCalls.push(call);
       const result = await executeTool(call.tool, call.args);
 
-      // Check if done
-      if (call.tool === "done") {
-        return { response: result.replace(/^__DONE__/, "").trim(), toolCalls };
+      if (call.tool === 'done') {
+        return parseDoneResult(result, toolCalls);
       }
 
-      // Append result to messages for next iteration
       messages.push({
-        role: "system",
-        content: `[TOOL RESULT: ${call.tool}]\n${result}\n\nLanjutkan atau selesaikan dengan tool "done".`,
+        role: 'system',
+        content: `[Tool Result: ${call.tool}]\n${result}\n\nContinue or call done().`,
       });
     }
   }
 
-  // Max iterations reached
+  // Max iterations — return what we have
+  const lastMsg = messages[messages.length - 1];
   return {
-    response: "Maaf, saya butuh waktu lebih lama dari biasanya. Bisa coba pertanyaan yang lebih spesifik?",
+    response: lastMsg?.content?.substring(0, 500) || 'Maaf, butuh waktu lebih lama. Bisa coba yang lebih spesifik?',
     toolCalls,
+    reasoning,
   };
 }
 
-// ── Streaming agent (for voice) ─────────────────────────────────────────────
-/**
- * Streaming version — yields words as they come.
- * Note: For voice, we typically want the full response before TTS.
- * Use runAgent() and stream the result to TTS.
- */
-async function* runAgentStream(userId, message, history = []) {
-  const { response } = await runAgent(userId, message, history);
-  // For streaming, yield word by word
-  const words = response.split(" ");
-  for (const word of words) {
-    yield word + " ";
+function parseDoneResult(result, toolCalls) {
+  try {
+    const json = result.replace(/^__DONE__/, '');
+    const parsed = JSON.parse(json);
+    return {
+      response: parsed.response || '',
+      proactive: parsed.proactive || null,
+      toolCalls,
+    };
+  } catch {
+    return {
+      response: result.replace(/^__DONE__/, '').trim(),
+      proactive: null,
+      toolCalls,
+    };
   }
+}
+
+// ── Post-processing: extract facts + update profile ─────────────────────────
+async function postProcess(userId, message, response) {
+  // Extract profile facts
+  await extractProfileFacts(userId, message, response);
+
+  // Detect habits every 20 messages
+  const profile = await getProfile(userId);
+  const messageCount = profile._messageCount || 0;
+  if (messageCount > 0 && messageCount % 20 === 0) {
+    await detectHabits(userId);
+  }
+
+  // Increment message count
+  await require('./user_profile').updateProfile(userId, { _messageCount: messageCount + 1 });
+}
+
+// ── Streaming version ────────────────────────────────────────────────────────
+async function* runAgentStream(userId, message, history = []) {
+  const { response, proactive, toolCalls } = await runAgent(userId, message, history);
+  yield { response, proactive, toolCalls, done: true };
 }
 
 module.exports = {
@@ -415,4 +423,5 @@ module.exports = {
   runAgentStream,
   executeTool,
   TOOLS,
+  postProcess,
 };
