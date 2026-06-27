@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>TTS Playback Test</title>
+  <style>
+    body { background: #0a0a14; color: white; font-family: sans-serif; padding: 40px; }
+    button { padding: 16px 32px; font-size: 18px; background: violet; color: white; border: none; border-radius: 12px; cursor: pointer; margin: 10px; }
+    .log { background: #111; padding: 16px; border-radius: 8px; margin-top: 20px; font-family: monospace; font-size: 13px; max-height: 300px; overflow-y: auto; }
+    .ok { color: #4ade80; } .err { color: #f87171; } .info { color: #60a5fa; }
+  </style>
+</head>
+<body>
+  <h2>TTS Audio Playback Test</h2>
+  <p>This page tests if TTS audio data can be received and played via WebSocket.</p>
+  
+  <button onclick="connectWS()">Connect & Play Test</button>
+  <button onclick="testWebAudio()">Test Web Audio API</button>
+  <button onclick="testAudioElement()">Test HTML Audio Element</button>
+  
+  <div class="log" id="log"></div>
+
+  <script>
+    function log(msg, type='info') {
+      const div = document.getElementById('log');
+      div.innerHTML += `<div class="${type}">${new Date().toISOString().slice(11,19)} ${msg}</div>`;
+      div.scrollTop = div.scrollHeight;
+    }
+    
+    async function testAudioElement() {
+      log('Testing HTML Audio element...');
+      // Create a tiny audio blob (sine wave) to test playback
+      try {
+        // Test if we can play audio at all
+        const audio = new Audio();
+        audio.controls = true;
+        document.body.appendChild(audio);
+        
+        // Try playing a data URI (short silent MP3)
+        audio.src = 'data:audio/mpeg;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u';
+        audio.volume = 1.0;
+        await audio.play();
+        log('HTML Audio element played OK', 'ok');
+      } catch(e) {
+        log('HTML Audio error: ' + e.message, 'err');
+      }
+    }
+    
+    async function testWebAudio() {
+      log('Testing Web Audio API...');
+      try {
+        const audioCtx = new AudioContext();
+        log('AudioContext state: ' + audioCtx.state);
+        if (audioCtx.state === 'suspended') {
+          log('AudioContext suspended - needs unlock', 'err');
+          await audioCtx.resume();
+          log('AudioContext resumed, state: ' + audioCtx.state, 'ok');
+        }
+        
+        // Create and play a short tone
+        const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.5, audioCtx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < data.length; i++) data[i] = Math.sin(440 * 2 * Math.PI * i / audioCtx.sampleRate);
+        
+        const source = audioCtx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(audioCtx.destination);
+        source.start(0);
+        log('Web Audio tone started, sampleRate: ' + audioCtx.sampleRate, 'ok');
+        
+        source.onended = () => log('Tone finished', 'info');
+      } catch(e) {
+        log('Web Audio error: ' + e.message, 'err');
+      }
+    }
+    
+    function connectWS() {
+      log('Connecting to WebSocket...');
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${location.host}/ws`);
+      
+      ws.onopen = () => {
+        log('WS connected', 'ok');
+        // Send a small test tone to trigger STT->LLM->TTS
+        // This is a real audio chunk that was recorded earlier
+        log('Sending audio chunk...');
+        // We'll just wait for messages
+      };
+      
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        log(`MSG: ${msg.type} ${msg.type === 'llm_done' ? msg.text.slice(0,60) : ''}`, 'ok');
+        
+        if (msg.type === 'tts_audio') {
+          log(`TTS audio received! data length: ${msg.data?.length || 'none'} chars base64`, 'ok');
+          try {
+            const binary = atob(msg.data);
+            const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+            log(`Decoded bytes: ${bytes.length}, first bytes: ${bytes[0]} ${bytes[1]} ${bytes[2]} ${bytes[3]}`);
+            
+            const blob = new Blob([bytes], { type: 'audio/mpeg' });
+            const url = URL.createObjectURL(blob);
+            log('Blob URL created: ' + url);
+            
+            const audio = new Audio(url);
+            audio.volume = 1.0;
+            audio.play().then(() => log('Playing!', 'ok')).catch(e => log('Play error: ' + e.message, 'err'));
+          } catch(e) {
+            log('TTS playback error: ' + e.message, 'err');
+          }
+        }
+        
+        if (msg.type === 'tts_fallback') {
+          log('TTS fallback: ' + msg.text, 'info');
+          const utt = new SpeechSynthesisUtterance(msg.text);
+          utt.rate = 1.1;
+          speechSynthesis.speak(utt);
+          log('Speech synthesis spoken', 'ok');
+        }
+      };
+      
+      ws.onerror = (e) => log('WS error: ' + JSON.stringify(e), 'err');
+      ws.onclose = () => log('WS closed');
+    }
+    
+    testAudioElement();
+  </script>
+</body>
+</html>

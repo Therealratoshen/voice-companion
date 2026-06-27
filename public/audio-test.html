@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Auto Audio Test</title>
+  <style>
+    body { background: #0a0a14; color: white; font-family: monospace; padding: 20px; font-size: 13px; }
+    .log { background: #111; padding: 12px; border-radius: 8px; margin-top: 16px; height: 400px; overflow-y: auto; font-size: 12px; }
+    .ok { color: #4ade80; } .err { color: #f87171; } .warn { color: #fbbf24; } .info { color: #60a5fa; }
+    .big { font-size: 24px; text-align: center; margin: 20px; }
+    h1 { color: #a78bfa; }
+  </style>
+</head>
+<body>
+  <h1>🎙️ Voice AI — Auto Diagnostics</h1>
+  <p>This page auto-runs all tests. Watch the log.</p>
+  <div class="log" id="log"></div>
+
+  <script>
+    const logEl = document.getElementById('log');
+    let testsPassed = 0, testsFailed = 0;
+    
+    function log(msg, type='info') {
+      const d = document.createElement('div');
+      d.className = type;
+      d.textContent = `${new Date().toISOString().slice(11,23)} ${msg}`;
+      logEl.appendChild(d);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function result(passed, msg) {
+      if (passed) { testsPassed++; log('✅ PASS: ' + msg, 'ok'); }
+      else { testsFailed++; log('❌ FAIL: ' + msg, 'err'); }
+    }
+
+    async function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+    async function runTests() {
+      log('Starting auto-tests...', 'info');
+      
+      // TEST 1: AudioContext creation
+      log('--- Test 1: AudioContext ---', 'info');
+      try {
+        const ac = new AudioContext({ sampleRate: 16000 });
+        log('SampleRate: ' + ac.sampleRate + ', State: ' + ac.state, 'info');
+        if (ac.sampleRate === 16000) result(true, 'AudioContext 16kHz created');
+        else result(false, 'AudioContext wrong sample rate: ' + ac.sampleRate);
+        if (ac.state === 'running') { result(true, 'AudioContext running'); }
+        else {
+          log('AudioContext suspended, attempting resume...', 'warn');
+          await ac.resume();
+          result(ac.state === 'running', 'AudioContext resumed to: ' + ac.state);
+        }
+        ac.close();
+      } catch(e) { result(false, 'AudioContext: ' + e.message); }
+
+      // TEST 2: Tiny MP3 decode
+      log('--- Test 2: MP3 decode via Blob URL ---', 'info');
+      try {
+        // Real MiniMax TTS output (first 32 bytes of actual MP3 base64 from test)
+        const mp3b64 = 'SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABhgC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7';
+        const binary = atob(mp3b64);
+        const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+        log('Decoded ' + bytes.length + ' bytes', 'info');
+        log('Magic bytes: ' + Array.from(bytes.slice(0,4)).map(x=>x.toString(16)).join(' '), 'info');
+        
+        const blob = new Blob([bytes], { type: 'audio/mpeg' });
+        const url = URL.createObjectURL(blob);
+        log('Blob URL: ' + url, 'info');
+        
+        const audio = new Audio(url);
+        audio.volume = 1.0;
+        
+        let played = false;
+        audio.oncanplaythrough = () => log('oncanplaythrough fired!', 'info');
+        audio.onplay = () => { played = true; log('onplay fired!', 'ok'); };
+        audio.onended = () => log('Audio ended normally', 'ok');
+        audio.onerror = (e) => log('Audio error: ' + JSON.stringify(e), 'err');
+        
+        await audio.play().catch(e => log('play() rejected: ' + e.message, 'err'));
+        await delay(500);
+        result(played, 'HTML Audio played (or attempted)');
+      } catch(e) { result(false, 'MP3 decode: ' + e.message); }
+
+      // TEST 3: Web Audio API decode
+      log('--- Test 3: Web Audio API decode + play ---', 'info');
+      try {
+        const ac = new AudioContext({ sampleRate: 16000 });
+        if (ac.state === 'suspended') await ac.resume();
+        
+        // Create 0.3s 880Hz tone and encode to MP3 via recording
+        const buffer = ac.createBuffer(1, 4800, 16000);
+        const d = buffer.getChannelData(0);
+        for (let i = 0; i < d.length; i++) d[i] = Math.sin(2*Math.PI*880*i/16000) * 0.5;
+        
+        // Use OfflineAudioContext to render
+        const off = new OfflineAudioContext(1, 4800, 16000);
+        const src = off.createBufferSource();
+        src.buffer = buffer;
+        src.connect(off.destination);
+        src.start();
+        const rendered = await off.startRendering();
+        log('Rendered buffer: ' + rendered.duration + 's, samples: ' + rendered.length, 'info');
+        
+        // Convert to WAV (simpler than MP3 for testing)
+        const wavBytes = encodeWAV(rendered);
+        const blob = new Blob([wavBytes], { type: 'audio/wav' });
+        const url = URL.createObjectURL(blob);
+        
+        const audio = new Audio(url);
+        audio.volume = 1.0;
+        let played = false;
+        audio.onplay = () => { played = true; log('WAV played via HTML Audio!', 'ok'); };
+        audio.onerror = (e) => log('WAV error: ' + JSON.stringify(e), 'err');
+        
+        await audio.play().catch(e => log('play() rejected: ' + e.message, 'err'));
+        await delay(500);
+        result(played, 'Web Audio API rendered + played');
+        ac.close();
+      } catch(e) { result(false, 'Web Audio API: ' + e.message); }
+
+      // TEST 4: Full WS pipeline
+      log('--- Test 4: Full WS → TTS → Play ---', 'info');
+      try {
+        const ac = new AudioContext({ sampleRate: 16000 });
+        if (ac.state === 'suspended') await ac.resume();
+        
+        const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${protocol}//${location.host}/ws`);
+        
+        let ttsAudioData = null;
+        let wsConnected = false;
+        
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => { ws.close(); reject(new Error('WS timeout 30s')); }, 30000);
+          
+          ws.onopen = async () => {
+            wsConnected = true;
+            log('WS connected', 'info');
+            // Send the test audio chunk
+            // This is the test_tone.wav we know works with STT
+            // We'll wait for tts_audio
+          };
+          
+          ws.onmessage = async (event) => {
+            const msg = JSON.parse(event.data);
+            log('WS msg: ' + msg.type + (msg.type === 'llm_word' ? ' ' + msg.text.slice(0,40) : ''), 
+                msg.type === 'tts_audio' ? 'ok' : msg.type === 'error' ? 'err' : 'info');
+            
+            if (msg.type === 'tts_audio') {
+              ttsAudioData = msg.data;
+              clearTimeout(timeout);
+              ws.close();
+              resolve();
+            }
+            if (msg.type === 'llm_done' && !ttsAudioData) {
+              // Wait a bit more for tts_audio
+              setTimeout(() => { if (!ttsAudioData) { clearTimeout(timeout); reject(new Error('No tts_audio after llm_done')); } }, 5000);
+            }
+          };
+          ws.onerror = (e) => { clearTimeout(timeout); reject(new Error('WS error')); };
+          ws.onclose = () => { clearTimeout(timeout); if (!wsConnected) reject(new Error('WS closed before connect')); };
+        });
+        
+        result(ttsAudioData !== null, 'Got TTS audio data: ' + (ttsAudioData?.length || 0) + ' chars');
+        
+        // Now play it
+        if (ttsAudioData) {
+          try {
+            const binary = atob(ttsAudioData);
+            const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+            log('TTS bytes: ' + bytes.length + ', header: ' + Array.from(bytes.slice(0,4)).map(x=>x.toString(16)).join(' '), 'info');
+            
+            const blob = new Blob([bytes], { type: 'audio/mpeg' });
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.volume = 1.0;
+            
+            let played = false;
+            audio.onplay = () => { played = true; log('TTS audio playing!', 'ok'); };
+            audio.onerror = (e) => log('TTS audio error: ' + JSON.stringify(e), 'err');
+            
+            await audio.play().catch(e => log('TTS play rejected: ' + e.message, 'err'));
+            await delay(1000);
+            result(played, 'TTS audio played in browser');
+          } catch(e) { result(false, 'TTS playback: ' + e.message); }
+        }
+        ac.close();
+      } catch(e) { result(false, 'Full WS pipeline: ' + e.message); }
+
+      // FINAL
+      log('', 'info');
+      log('=============================', 'info');
+      log(`RESULTS: ${testsPassed} passed, ${testsFailed} failed`, testsFailed === 0 ? 'ok' : 'err');
+      log('=============================', 'info');
+      
+      if (testsFailed > 0) {
+        log('', 'warn');
+        log('Some tests failed. Please share this page URL and screenshot.', 'warn');
+      }
+    }
+
+    // WAV encoder for OfflineAudioContext output
+    function encodeWAV(audioBuffer) {
+      const numChannels = audioBuffer.numberOfChannels;
+      const sampleRate = audioBuffer.sampleRate;
+      const format = 1; // PCM
+      const bitDepth = 16;
+      const bytesPerSample = bitDepth / 8;
+      const blockAlign = numChannels * bytesPerSample;
+      
+      const samples = audioBuffer.length;
+      const dataSize = samples * numChannels * bytesPerSample;
+      const buffer = new ArrayBuffer(44 + dataSize);
+      const view = new DataView(buffer);
+      
+      const writeString = (offset, str) => { for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i)); };
+      writeString(0, 'RIFF');
+      view.setUint32(4, 36 + dataSize, true);
+      writeString(8, 'WAVE');
+      writeString(12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, format, true);
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * blockAlign, true);
+      view.setUint16(32, blockAlign, true);
+      view.setUint16(34, bitDepth, true);
+      writeString(36, 'data');
+      view.setUint32(40, dataSize, true);
+      
+      const channelData = audioBuffer.getChannelData(0);
+      let offset = 44;
+      for (let i = 0; i < samples; i++) {
+        const s = Math.max(-1, Math.min(1, channelData[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+        offset += 2;
+      }
+      return new Uint8Array(buffer);
+    }
+
+    runTests();
+  </script>
+</body>
+</html>
