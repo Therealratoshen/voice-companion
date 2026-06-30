@@ -1,4 +1,5 @@
 ---
+---
 name: voice-companion
 description: |
   Voice AI companion built with Agora Agents SDK + MiniMax + TiDB.
@@ -8,7 +9,7 @@ description: |
   "MiniMax TTS", "Edge TTS", "real-time voice agent", or any work on
   github.com/Therealratoshen/voice-companion.
   Do NOT use for Shortcutsistem, AI Agent School, or general chat — those are separate projects.
-version: 1.0.0
+version: 2.0.0
 permissions:
   - file.read
   - file.write
@@ -38,8 +39,11 @@ Browser mic → [Agora RTC] → Agent (server)
 |------|---------|
 | `lib/agora.ts` | Agora Agents SDK setup, session registry, buildAgent, startAndRegisterSession, stopSession, interruptAgent |
 | `lib/minimax.ts` | MiniMax LLM + TTS clients; buildMiniMaxLLMConfig(), buildMiniMaxTTSConfig() |
-| `lib/memory.ts` | TiDB FULLTEXT memory search + upsert |
+| `lib/memory.ts` | TiDB memory: buildContext, extractAndSaveMemories, generateSessionSummary, saveTurn, upsertUserProfile |
 | `lib/token.ts` | RTC token generator (fallback for agora-access-token) |
+| `app/api/session/context/route.ts` | `GET /api/session/context?userId=...&message=...` |
+| `app/api/session/react/route.ts` | `POST /api/session/react` — quick reaction injection |
+| `app/api/session/summarize/route.ts` | `POST /api/session/summarize` — session end memory extraction |
 | `server.js` | Custom Next.js server — auto-detects Agora vs legacy mode |
 | `app/voice/page.tsx` | Browser UI (Agora RTC Web SDK loaded via CDN) |
 | `app/api/session/create/route.ts` | `POST /api/session/create` — creates session, returns channel + token |
@@ -75,6 +79,14 @@ TIDB_PASSWORD
 TIDB_DATABASE
 ```
 
+## Memory system (v2)
+
+Memory context is built before each session via `buildContext(userId, sessionId, query)` → `formatContextForLLM()` → injected as `[KONTEKS MEMORY]` block in the system prompt.
+
+Post-session: `generateSessionSummary()` + `extractAndSaveMemories()` run in the `session.on('stopped')` handler in `lib/agora.ts`.
+
+Memory degrades gracefully — if TiDB is unavailable, all memory functions return empty results.
+
 ## How to make changes
 
 ### 1. Change the LLM
@@ -86,11 +98,13 @@ Change `MINIMAX_VOICE_ID` in `.env.production`, or edit `buildMiniMaxTTSConfig()
 ### 3. Add a new session API route
 Add a file under `app/api/<resource>/<action>/route.ts`. Next.js App Router convention: `page.tsx` → GET, `route.ts` → HTTP method handlers.
 
-### 4. Change the system prompt
-System prompt lives in two places:
-- `lib/agora.ts` → `buildMiniMaxLLMConfig()` → `systemMessages` (Agora mode)
-- `lib/ws-handler-legacy.ts` → `SYSTEM_PROMPT` (legacy mode)
-Both should stay in sync.
+### 4. Change the system prompt / personality
+Edit `lib/minimax.ts`:
+- `PERSONA_PRESETS` — 4 tones: warm (default), casual, professional, playful
+- `buildPersonaPrompt()` — assembles persona + userName + memory context
+- `buildMiniMaxLLMConfig()` → `systemMessages` (Agora mode, uses warm preset by default)
+- `lib/ws-handler-legacy.ts` → `SYSTEM_PROMPT` (legacy mode, separate)
+Both should stay in sync for consistent behavior.
 
 ### 5. Modify VAD / turn detection
 Edit the `turnDetection` block in `lib/agora.ts` → `buildAgent()`:

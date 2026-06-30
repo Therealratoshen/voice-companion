@@ -250,10 +250,13 @@ export async function stopSession(agentId: string): Promise<void> {
     return;
   }
   try {
-    await entry.client.agents.stop({ appid: process.env.AGORA_APP_ID!, agentId });
+    // Use session.stop() directly — more reliable than REST API
+    await entry.session.stop();
+  } catch (err) {
+    console.warn(`[Agora] session.stop() error:`, err);
   } finally {
     activeSessions.delete(agentId);
-    console.log(`[Agora] Session stopped — agentId=${agentId}`);
+    console.log(`[Agora] Session deregistered — agentId=${agentId}`);
   }
 }
 
@@ -261,23 +264,17 @@ export async function stopSession(agentId: string): Promise<void> {
 export async function interruptAgent(agentId: string): Promise<void> {
   const entry = activeSessions.get(agentId);
   if (!entry) return;
-  await entry.client.agents.interrupt({
-    appid: process.env.AGORA_APP_ID!,
-    agentId,
-  });
+  await entry.session.interrupt();
 }
 
-/** Inject a text event into the agent (e.g. button click) */
+/** Inject a text event into the agent (e.g. quick reaction). */
 export async function agentThink(
   agentId: string,
   text: string
 ): Promise<void> {
   const entry = activeSessions.get(agentId);
   if (!entry) return;
-  await entry.client.agentManagement.agentThink({
-    appid: process.env.AGORA_APP_ID!,
-    agentId,
-    text,
+  await entry.session.think(text, {
     on_listening_action: "inject",
     on_thinking_action: "interrupt",
     on_speaking_action: "ignore",
@@ -285,17 +282,16 @@ export async function agentThink(
   });
 }
 
-/** Update agent's system messages at runtime (e.g. after memory fetch) */
+/** Update agent's system messages at runtime (e.g. after memory fetch). */
 export async function updateAgentContext(
   agentId: string,
   systemMessages: Array<{ role: "system"; content: string }>
 ): Promise<void> {
   const entry = activeSessions.get(agentId);
   if (!entry) return;
-  await entry.client.agents.update({
-    appid: process.env.AGORA_APP_ID!,
-    agentId,
-    properties: { llm: { system_messages: systemMessages } },
+  // Use raw SDK API via session.raw for config updates
+  await entry.session.update({
+    llm: { system_messages: systemMessages } as any,
   });
 }
 
@@ -307,11 +303,8 @@ export async function sessionSay(
 ): Promise<void> {
   const entry = activeSessions.get(agentId);
   if (!entry) return;
-  await entry.client.agents.speak({
-    appid: process.env.AGORA_APP_ID!,
-    agentId,
-    text,
-    priority,
+  await entry.session.say(text, {
+    priority: priority as "INTERRUPT" | "APPEND" | "IGNORE",
     interruptable: true,
   });
 }
