@@ -1,13 +1,12 @@
 /**
- * Local RTC token generator — fallback if agora-agents doesn't export one.
- * Uses the agora-token package (a dependency of agora-agents).
+ * Local RTC token generator — fallback if the agora-agents SDK is unavailable.
  *
- * Based on: https://docs.agora.io/en/video-calling/reference/core-principles
+ * Uses agora-access-token v2 (namespace-based API, not class-based).
  */
 
-import { AccessToken, Role } from "agora-access-token";
+import { RtcTokenBuilder, RtcRole } from "agora-access-token";
 
-const ROLE = Role.RolePublisher; // Publishers can publish audio (and receive)
+const ROLE = RtcRole.PUBLISHER; // Publishers can publish + receive audio
 
 export interface GenerateTokenOptions {
   appId: string;
@@ -26,17 +25,20 @@ export function generateToken(options: GenerateTokenOptions): string {
     appCertificate,
     channelName,
     uid,
-    expirationTimeInSeconds = 3600, // 1 hour default
+    expirationTimeInSeconds = 3600,
   } = options;
 
-  const expirationTimeInSeconds2 =
-    typeof expirationTimeInSeconds === "number"
-      ? expirationTimeInSeconds
-      : expirationTimeInSeconds.seconds ?? 3600;
+  const expirationTs = Math.floor(Date.now() / 1000) + expirationTimeInSeconds;
 
-  const token = new AccessToken(appId, appCertificate, channelName, uid);
-  token.addExpiration(expirationTimeInSeconds2);
-  token.addPrivilage(ROLE, expirationTimeInSeconds2);
+  // uid must be a number for buildTokenWithUid
+  const numericUid = typeof uid === "string" ? parseInt(uid, 10) || 0 : uid;
 
-  return token.build();
+  return RtcTokenBuilder.buildTokenWithUid(
+    appId,
+    appCertificate,
+    channelName,
+    numericUid,
+    ROLE,
+    expirationTs
+  );
 }

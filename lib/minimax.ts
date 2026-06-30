@@ -180,14 +180,15 @@ export function buildMiniMaxLLMConfig(overrides: {
   model?: string;
   temperature?: number;
   maxTokens?: number;
-  systemMessages?: MiniMaxChatMessage[];
+  /** Agora SDK expects Record<string, unknown>[] for systemMessages */
+  systemMessages?: Record<string, unknown>[];
   greetingMessage?: string;
 } = {}): {
   url: string;
   apiKey: string;
   model: string;
   params: Record<string, unknown>;
-  systemMessages: MiniMaxChatMessage[];
+  systemMessages: Record<string, unknown>[];
   greetingMessage: string;
   maxHistory: number;
 } {

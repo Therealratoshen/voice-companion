@@ -65,7 +65,7 @@ app.prepare().then(async () => {
 
     agoraClient = new AgoraClient({
       area:
-        process.env.AGORA_AREA === "CN" ? Area.CN : Area.GLOBAL,
+        process.env.AGORA_AREA === "CN" ? Area.CN : Area.US,
       appId: process.env.AGORA_APP_ID,
       appCertificate: process.env.AGORA_APP_CERTIFICATE,
     });

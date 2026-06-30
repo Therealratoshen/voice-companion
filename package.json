@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "agora-access-token": "^2.0.4",
     "agora-agents": "^2.4.0",
     "dotenv": "^17.4.2",
     "mysql2": "^3.11.0",

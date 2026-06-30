@@ -16,7 +16,8 @@ import {
   Area,
   DeepgramSTT,
   ExpiresIn,
-  ExpiresInSeconds,
+  // AsrLanguage is a string literal union — needed for turnDetection.language
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
 } from "agora-agents";
 import * as crypto from "crypto";
 import { buildMiniMaxLLMConfig, buildMiniMaxTTSConfig } from "./minimax";
@@ -34,7 +35,7 @@ function createClient(): AgoraClient {
     );
   }
 
-  const area = process.env.AGORA_AREA === "CN" ? Area.CN : Area.GLOBAL;
+  const area = process.env.AGORA_AREA === "CN" ? Area.CN : Area.US;
 
   return new AgoraClient({
     area,
@@ -97,7 +98,8 @@ export async function buildAgent(
   const agent = new Agent({
     client,
     turnDetection: {
-      language: config.turnDetectionLanguage || "id-ID",
+      // AsrLanguage is a string literal union — cast needed since config field is generic string
+      language: (config.turnDetectionLanguage || "id-ID") as "id-ID" | "en-US" | "zh-CN",
       config: {
         start_of_speech: {
           mode: "vad",
@@ -139,7 +141,7 @@ export async function buildAgent(
 export interface CreateSessionOptions {
   userId: string;
   channelName?: string;
-  expiresIn?: ExpiresInSeconds;
+  expiresIn?: number;
   /** Pre-built system messages (including memory if enabled) */
   systemMessages?: Array<{ role: "system"; content: string }>;
 }
@@ -167,25 +169,15 @@ export async function createSession(
   const userUid = Math.floor(Math.random() * 9000) + 1000;
   const tokenExpires = options.expiresIn || ExpiresIn.hours(1);
 
-  // Generate tokens
+  // Generate RTC token for browser user (sync)
   const { generateRtcToken } = await import("agora-agents");
-  const { generateToken } = await import("./token");
-
-  const userToken = await generateRtcToken({
+  const userToken = generateRtcToken({
     appId,
     appCertificate: certificate,
     channel,
     uid: userUid,
-    expirationSeconds: tokenExpires,
-  }).catch(() =>
-    generateToken({
-      appId,
-      appCertificate: certificate,
-      channelName: channel,
-      uid: userUid,
-      expirationTimeInSeconds: tokenExpires,
-    })
-  );
+    expirySeconds: tokenExpires,
+  });
 
   const session = agent.createSession({
     name: `voice-${options.userId}-${Date.now()}`,

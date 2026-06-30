@@ -7,8 +7,24 @@
  */
 
 import { randomUUID } from "crypto";
-import { groqSTT } from "./minimax";
 import { groqStream } from "./groq";
+
+// ── Groq Whisper STT (inline — only used in legacy mode) ────────────────────
+async function groqSTT(audioBuffer: Buffer) {
+  const formData = new FormData();
+  formData.append("file", new Blob([new Uint8Array(audioBuffer)]), "audio.webm");
+  formData.append("model", "whisper-large-v3");
+  formData.append("response_format", "verbose_json");
+  formData.append("timestamp_granularities[]", "word");
+
+  const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+    body: formData,
+  });
+  const data = await res.json();
+  return { text: data.text || "", segments: data.segments || [] };
+}
 
 const SYSTEM_PROMPT = `Kamu adalah asisten suara AI yang hangat dan ramah di telepon.
 Selalu jawab dalam Bahasa Indonesia.
