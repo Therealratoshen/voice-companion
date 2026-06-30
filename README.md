@@ -1,81 +1,82 @@
 # Voice AI Companion
 
-A real-time voice AI companion built with Next.js, WebSocket, Groq (LLM + STT), and MiniMax (TTS). Runs in the browser — open the URL, tap call, and talk naturally.
+A real-time voice AI companion powered by **Agora Agents SDK** + **MiniMax** + **TiDB memory**.
 
-> **Also relevant:** This project is part of a broader voice AI R&D effort that includes an [Agora AI Phone Agent](#-agora-ai-phone-agent) for Indonesian SMEs. See the [Agora projects →](#-agora-ai-agent-stack) below.
+Open the URL → tap call → talk naturally in Bahasa Indonesia. The agent remembers your conversation history.
 
 ---
 
 ## Stack
 
-| Layer | Technology |
-|-------|-----------|
-| Frontend | Next.js 14 (App Router), Tailwind CSS |
-| Realtime | WebSocket (native, no Socket.io) |
-| Speech → Text | Groq Whisper (`whisper-large-v3`) |
-| LLM | Groq (`llama-3.3-70b-versatile`), streaming |
-| Text → Speech | MiniMax (`speech-02-hd`) |
-| Memory | TiDB (MySQL serverless, FULLTEXT search) |
-| Audio I/O | Web Audio API + MediaRecorder |
-| VAD | Energy-based silence detection (no external SDK) |
+| Layer | Technology | Notes |
+|-------|-----------|-------|
+| **Audio Transport** | Agora RTC (via `agora-agents` SDK) | Real-time WebRTC, global edge, <200ms latency |
+| **STT** | Deepgram (Agora managed) | Indonesian supported, VAD built-in |
+| **LLM** | MiniMax (`abab6.5s-chat`) via CustomLLM | Your API key, OpenAI-compatible endpoint |
+| **TTS** | MiniMax TTS (`speech-02-hd`) | Your API key, streamed back over RTC |
+| **Memory** | TiDB (MySQL serverless) | FULLTEXT search, session context injection |
+| **Frontend** | Next.js 14 (App Router) + Web Audio API | Browser mic → RTC channel |
 
 ---
 
-## How It Works
+## Architecture
 
 ```
-Browser mic → MediaRecorder (webm) → WS → server.js
-                                           │
-                                           ├─ Groq Whisper → transcript
-                                           │                      │
-                                           ├─ Groq Llama (streaming)
-                                           │                      │
-                                           └─ MiniMax TTS ───────┘
-                                                       │
-                                              TTS chunks → WS → browser
-                                                              │
-                                                   Web Audio API playMp3Data()
+Browser (mic on)
+    │
+    │ 1. POST /api/session/create
+    │    ← { channel, userToken, userUid, agentId }
+    │
+    │ 2. Join Agora RTC channel
+    ▼
+Agora RTC Network ─── Agent (server-side, agora-agents SDK)
+    │                     │
+    │                     │ Deepgram STT (audio → text)
+    │                     ▼
+    │                  MiniMax LLM (text → response)
+    │                     │
+    │                     │ MiniMax TTS (response → audio)
+    │                     ▼
+    │                  Agent audio ──→ RTC channel ──→ Browser
+    │
+    │ 3. POST /api/session/stop (when call ends)
+    ▼
 ```
 
-1. User presses call → WebSocket connects → mic stream starts
-2. Energy-based VAD detects silence after speech → sends audio chunk via WS
-3. Server transcribes with Groq Whisper → gets text
-4. Text sent to Groq Llama with conversation memory from TiDB → streaming response
-5. Each LLM word is forwarded to MiniMax TTS → MP3 chunks sent back over WS
-6. Browser plays chunks via `playMp3Data()` using `decodeAudioData()` — mic is auto-muted while AI speaks to prevent feedback
-7. After TTS finishes, mic unmutes automatically
+**Memory flow:** Before each session, TiDB is queried for the user's past context. Memories are injected as a system message into the MiniMax LLM prompt.
 
 ---
 
-## Setup
+## Quick Start
 
-### 1. Install dependencies
+### 1. Clone & install
 
 ```bash
+git clone git@github.com:Therealratoshen/voice-companion.git
+cd voice-companion
 npm install
 ```
 
-### 2. Configure environment
-
-```bash
-cp .env.example .env.local
-```
-
-Fill in your keys:
+### 2. Get API keys
 
 | Variable | Where to get it |
 |----------|----------------|
-| `GROQ_API_KEY` | [console.groq.com](https://console.groq.com) |
+| `AGORA_APP_ID` | [console.agora.io](https://console.agora.io) → Conversational AI → Project Settings |
+| `AGORA_APP_CERTIFICATE` | Same as above |
 | `MINIMAX_API_KEY` | [platform.minimaxi.com](https://platform.minimaxi.com) |
 | `MINIMAX_GROUP_ID` | MiniMax dashboard |
-| `MINIMAX_VOICE_ID` | Voice ID from MiniMax (default: `male-qn-qingse`) |
-| `TIDB_HOST` | TiDB Cloud console → Connection → Standard Connection |
-| `TIDB_PORT` | Usually `4000` |
-| `TIDB_USER` | TiDB username |
-| `TIDB_PASSWORD` | TiDB password |
-| `TIDB_DATABASE` | Database name |
+| `MINIMAX_LLM_MODEL` | e.g. `abab6.5s-chat` |
+| `MINIMAX_VOICE_ID` | From MiniMax voice library |
+| `TIDB_*` | [tidbcloud.com](https://tidbcloud.com) → Connection |
 
-### 3. Set up TiDB schema
+### 3. Configure
+
+```bash
+cp .env.example .env.production
+# Fill in your keys in .env.production
+```
+
+### 4. Set up TiDB schema
 
 Run `schema.sql` in the TiDB Cloud SQL Editor:
 
@@ -86,11 +87,16 @@ Run `schema.sql` in the TiDB Cloud SQL Editor:
 --   memory_logs   — memory audit trail
 ```
 
-### 4. Start the server
+### 5. Deploy (Docker — recommended for VPS)
 
 ```bash
-npm run dev
-# or production:
+docker-compose up -d
+```
+
+Or without Docker:
+
+```bash
+npm run build
 npm start
 ```
 
@@ -98,133 +104,120 @@ Open [http://localhost:3456/voice](http://localhost:3456/voice)
 
 ---
 
+## API Routes
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/session/create` | POST | Create a voice agent session. Returns channel + RTC token for browser. |
+| `/api/session/stop` | POST | Stop an active session. Body: `{ agentId }` |
+| `/api/health` | GET | Health check for monitoring |
+
+### Create Session
+
+```bash
+curl -X POST http://localhost:3456/api/session/create \
+  -H "Content-Type: application/json" \
+  -d '{"userId": "user-123", "language": "id-ID"}'
+```
+
+```json
+{
+  "channel": "voice-1234567890-abc123",
+  "userToken": "...",
+  "userUid": 4821,
+  "agentId": "agent-xyz",
+  "appId": "your-app-id"
+}
+```
+
+---
+
 ## Project Structure
 
 ```
 voice-companion/
-├── server.js           # Custom Next.js server + WebSocket handler
-├── app/
-│   ├── voice/page.tsx  # Voice call UI (main page)
-│   └── audio-test/     # Audio diagnostics page
+├── server.js                    # Custom Next.js server (Agora or legacy WS mode)
+├── Dockerfile                   # Production container image
+├── docker-compose.yml           # Docker Compose setup
+│
 ├── lib/
-│   ├── groq.ts         # Groq LLM + Whisper STT
-│   ├── minimax.ts     # MiniMax TTS
-│   ├── tidb.ts         # TiDB connection pool
-│   └── memory.ts       # Memory search (FULLTEXT)
-├── public/
-│   ├── audio-test.html # Standalone audio diagnostic
-│   └── test-playback.html
-└── schema.sql          # TiDB schema
+│   ├── agora.ts                 # Agora Agents SDK setup + session management
+│   ├── minimax.ts               # MiniMax LLM + TTS clients + SDK config builders
+│   ├── memory.ts                # TiDB memory search + upsert
+│   ├── groq.ts                  # Groq LLM (legacy mode)
+│   └── token.ts                 # RTC token generator fallback
+│
+├── app/
+│   ├── voice/page.tsx           # Browser UI (Agora RTC mode)
+│   ├── audio-test/              # Audio diagnostics
+│   └── api/
+│       ├── session/create/      # POST — create Agora session
+│       ├── session/stop/        # POST — stop session
+│       └── health/              # GET — health check
+│
+├── types/
+│   └── agora-rtc-sdk-ng.d.ts    # TypeScript declarations for CDN-loaded RTC SDK
+│
+└── schema.sql                   # TiDB schema (FULLTEXT indexes)
 ```
 
 ---
 
-## Key Architecture Decisions
+## Two Modes
 
-### Why WebSocket instead of Agora?
+The server auto-detects which mode to use based on your environment:
 
-This project uses raw WebSocket for maximum control over the audio pipeline. The mic captures PCM via `MediaRecorder`, chunks are sent to the server, and TTS audio flows back as base64 MP3 chunks.
-
-**Trade-off:** The browser mic can't be shared with other tabs during a call.
-
-### Why energy-based VAD?
-
-Keeps the dependency footprint small — no Silero, no external VAD service. At 16kHz sample rate, a 20ms RMS energy threshold of `0.02` works well for speech vs silence in normal indoor environments.
-
-### Why MiniMax TTS?
-
-Low latency, good quality Mandarin voice support, and competitive pricing for Chinese-language voice companions.
-
-### Why TiDB?
-
-Serverless MySQL-compatible database. Works well on free tier, supports FULLTEXT indexes for naive memory search without needing a separate Mem9/vector service.
+| Mode | Trigger | STT | LLM | TTS |
+|------|---------|-----|-----|-----|
+| **Agora (default)** | `AGORA_APP_ID` is set | Deepgram | MiniMax | MiniMax |
+| **Legacy WebSocket** | `AGORA_APP_ID` is NOT set | Groq Whisper | Groq Llama | Edge TTS |
 
 ---
 
-## 🤖 Agora AI Agent Stack
+## Key Features
 
-This voice-companion project is one half of a broader voice AI R&D effort. The other half is an **Agora-powered AI Phone Agent** targeting Indonesian SMEs — a different architecture optimized for phone calls rather than browser-based voice chat.
+### 🎙️ Interrupt handling
+Agora's VAD handles interruptions natively — users can cut the agent off mid-sentence by starting to speak.
 
-### Project A: AI Phone Agent for Indonesian SMEs
+### 💾 Memory injection
+Before each session, the server fetches up to 5 recent memories from TiDB and injects them as a system message. The agent knows who it's talking to.
 
-**Location:** `ai-phone-agent/`
+### 🌏 Indonesian-first
+System prompt is in Bahasa Indonesia. Deepgram STT language set to `id`. TTS uses `id-ID` turn detection.
 
-A landing-page + server setup for a phone-based AI agent targeting Indonesian small businesses. The agent handles inbound business calls 24/7 — answering common questions like hours, pricing, availability — reducing call volume for business owners.
-
-> "Jawab pertanyaan yang sama 50 kali sehari itu capek banget. Terutama kalau Anda juga harus handle WA, chat, marketplace — telephon lagi. Waktu Anda hilang untuk hal yang seharusnya AI bisa handle."
-
-Key features:
-- 24/7 AI telephone agent
-- Indonesian language support (ASR + TTS)
-- Multi-persona support (different agent personalities)
-- Integration with Agora RTC for voice
-
-### Project B: Agora Conversational AI — Custom LLM Recipe
-
-**Location:** `agora-quickstart/recipe-custom-llm/`
-
-The official Agora reference implementation for building a custom LLM TTS pipeline into Agora's Conversational AI cloud. This is the bridge between a custom LLM/TTS backend and Agora's RTC network.
-
-```
-Browser (Next.js)
-  │ fetch /api/*
-  ▼
-Next.js ──rewrite──▶ Agent backend (:8000)
-                          │ CustomLLM(output_modalities=["audio"])
-                          ▼
-                       Agora ConvoAI Cloud
-                          │ POST <CUSTOM_LLM_URL> (your audio endpoint)
-                          ▼
-                       Custom audio endpoint → PCM audio → RTC
-```
-
-Key files:
-- `server/` — Python FastAPI backend with mounted `/audio` endpoint
-- `web/` — Next.js frontend
-- `AGENTS.md` / `ARCHITECTURE.md` — full design docs
-
-Setup:
-```bash
-bun run setup          # install deps + create venv
-ngrok http 8000        # expose backend publicly
-# Add ngrok URL to CUSTOM_LLM_URL in server/.env.local
-bun run dev            # start all services
-```
-
----
-
-## Related Projects
-
-| Project | Description |
-|---------|-------------|
-| `voice-companion/` | Browser-based voice AI companion (WebSocket + Groq + MiniMax) |
-| `ai-phone-agent/` | Landing page for Indonesian SME phone AI agent |
-| `agora-quickstart/recipe-custom-llm/` | Agora Custom LLM TTS recipe (Python + Next.js) |
-| `band-agent/` | Band protocol agent (separate, experimental) |
-| `whatsapp-booking-agent/` | WhatsApp booking automation agent |
+### 🔄 BYO everything
+- **LLM**: swap MiniMax for any OpenAI-compatible endpoint via `CustomLLM`
+- **TTS**: change voice ID in `MINIMAX_VOICE_ID`
+- **STT**: Agora managed (Deepgram) — Indonesian supported out of the box
 
 ---
 
 ## Troubleshooting
 
-**Microphone not working?**
-→ Visit `/audio-test` in the browser to run audio diagnostics
+**Session creation fails with 503?**
+→ Check `AGORA_APP_ID` and `AGORA_APP_CERTIFICATE` are set.
 
-**AI not responding?**
-→ Check `GROQ_API_KEY` is set and has quota remaining
+**Agent joins channel but doesn't respond?**
+→ Check `MINIMAX_API_KEY` and `MINIMAX_GROUP_ID` are valid and have quota.
 
-**TTS playing but cutting out?**
-→ Check `MINIMAX_API_KEY` and `MINIMAX_GROUP_ID` are correct
+**TTS plays but sounds wrong?**
+→ Try a different `MINIMAX_VOICE_ID`. The voice library is in the MiniMax dashboard.
 
 **Memory not being recalled?**
-→ Verify TiDB schema was created and FULLTEXT index exists
+→ Verify TiDB schema was created with the FULLTEXT index. Check `TIDB_*` env vars.
+
+**Browser mic not working?**
+→ Visit `/audio-test` for audio diagnostics.
 
 ---
 
 ## Roadmap
 
-- [ ] Replace naive FULLTEXT memory with proper reranking / Mem9
-- [ ] MiniMax STT integration (currently uses Groq Whisper only)
-- [ ] Multi-turn memory summarization to stay within context window
-- [ ] Align AI Phone Agent backend with voice-companion memory layer
-- [ ] Add Indonesian language persona support to voice-companion
+- [x] Agora Agents SDK integration
+- [x] MiniMax LLM + TTS via CustomLLM
+- [x] TiDB memory injection per session
+- [x] Docker deployment
+- [ ] Rafiqspace STT as Deepgram alternative
+- [ ] Multi-language support (EN/ID toggle)
+- [ ] Session history panel
+- [ ] One-tap call from web (no install)
