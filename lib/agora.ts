@@ -21,7 +21,7 @@ import {
 } from "agora-agents";
 import * as crypto from "crypto";
 import { buildMiniMaxLLMConfig, buildMiniMaxTTSConfig } from "./minimax";
-import { searchMemory } from "./memory";
+import { fetchRelevantMemories } from "./memory";
 
 // ── Agora Client ─────────────────────────────────────────────────────────────
 
@@ -200,6 +200,41 @@ export async function startAndRegisterSession(
   userId: string
 ): Promise<string> {
   const agentId: string = await session.start();
+
+  // ── Session event listeners ───────────────────────────────────────────
+  session.on("stopped", async () => {
+    console.log(`[Agora] Session stopped — agentId=${agentId} userId=${userId}`);
+
+    // Auto-generate session summary + extract memories from full history
+    try {
+      const { generateSessionSummary, fetchRecentHistory, extractAndSaveMemories } =
+        await import("./memory");
+
+      // Fetch full history for this session
+      const turns = await fetchRecentHistory(userId, channel, 50);
+
+      // Extract memories from each user→assistant pair
+      for (const turn of turns) {
+        if (turn.role === "user" && turn.user_text && turn.assistant_text) {
+          await extractAndSaveMemories(userId, turn.user_text, turn.assistant_text, channel);
+        }
+      }
+
+      // Save session summary
+      await generateSessionSummary(userId, channel);
+      console.log(`[Agora] Memory extraction complete for session=${channel}`);
+    } catch (err) {
+      console.warn(`[Agora] Post-session memory extraction failed:`, err);
+    }
+
+    activeSessions.delete(agentId);
+  });
+
+  session.on("error", (err: unknown) => {
+    console.error(`[Agora] Session error — agentId=${agentId}:`, err);
+    activeSessions.delete(agentId);
+  });
+
   activeSessions.set(agentId, { session, client, channel, userId, agentId });
   console.log(`[Agora] Session registered — agentId=${agentId} channel=${channel}`);
   return agentId;
@@ -262,4 +297,26 @@ export async function updateAgentContext(
     agentId,
     properties: { llm: { system_messages: systemMessages } },
   });
+}
+
+/** Proactively say something to the user (interrupts current speech). */
+export async function sessionSay(
+  agentId: string,
+  text: string,
+  priority: "INTERRUPT" | "APPEND" = "INTERRUPT"
+): Promise<void> {
+  const entry = activeSessions.get(agentId);
+  if (!entry) return;
+  await entry.client.agents.speak({
+    appid: process.env.AGORA_APP_ID!,
+    agentId,
+    text,
+    priority,
+    interruptable: true,
+  });
+}
+
+/** Get all active sessions (for debugging/monitoring). */
+export function getActiveSessions(): ActiveSession[] {
+  return Array.from(activeSessions.values());
 }

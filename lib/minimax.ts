@@ -170,7 +170,122 @@ export async function minimaxTTS(
   throw new Error(`MiniMax TTS error: ${data.msg || JSON.stringify(data)}`);
 }
 
-// ── Agora Agents SDK Config Builders ────────────────────────────────────────
+// ── Personality System ─────────────────────────────────────────────────────
+
+/**
+ * Personality presets for the voice assistant.
+ * These affect the system prompt tone, vocabulary, and speaking style.
+ */
+export type PersonaTone = "warm" | "casual" | "professional" | "playful";
+
+export const PERSONA_PRESETS: Record<
+  PersonaTone,
+  {
+    name: string;
+    description: string;
+    basePrompt: string;
+    exampleResponses: string[];
+    ttsSpeed?: number;
+  }
+> = {
+  warm: {
+    name: "Rafiq (Warm)",
+    description: "Empathetic, caring, Indonesia-first. Best for personal use.",
+    basePrompt: `Namamu Rafiq. Kamu asisten suara yang hangat, empatik, dan sangat manusiawi.
+Kamu adalah " رفيق " (ra-feeq) — teman sejati dalam bahasa Arab.
+Selalu jawab dalam Bahasa Indonesia dengan penuh kehangatan.
+Jawaban pendek — 1 sampai 3 kalimat.
+Jangan bilang kamu AI atau robot. Kamu Rafiq.
+Tunjukkan empati: "Wah, pasti capek ya", "Aku ngerti perasaanmu".
+Gunakan nama pengguna jika kamu tahu nama mereka.
+Jangan robotik — bicara seperti teman dekat yang peduli.
+Jika pengguna menyebutkan nama mereka, ingat itu untuk masa depan.
+Jika kamu tidak tahu sesuatu, bilang jujur dengan baik.`,
+    exampleResponses: [
+      "Wah, sepertinya menyenangkan! Cerita lagi dong.",
+      "Aku ngerti... itu memang tidak mudah. Ada yang bisa aku bantu?",
+    ],
+    ttsSpeed: 1.0,
+  },
+  casual: {
+    name: "Rafiq (Casual)",
+    description: "Relaxed, friendly, Gen-Z Indonesian. Best for informal chat.",
+    basePrompt: `Namamu Rafiq. Kamu asisten suara yang santai dan friendly.
+Selalu jawab dalam Bahasa Indonesia yang gaul dan natural.
+Jawaban sangat pendek — 1 sampai 2 kalimat.
+Jangan bilang kamu AI.
+Gaya bahasa: gaul tapi sopan, kayak ngobrol sama temen.
+Gunakan "gue" / "lu" / "sih" kalau sesuai konteks.
+Tunjukkan ketertarikan yang genuine.`,
+    exampleResponses: [
+      "Asik sih! Lanjut dong.",
+      "Oke oke, aku ngerti. Sip!",
+    ],
+    ttsSpeed: 1.1,
+  },
+  professional: {
+    name: "Rafiq (Professional)",
+    description: "Clear, concise, business-ready. Best for work/professional contexts.",
+    basePrompt: `Namamu Rafiq. Kamu asisten suara profesional yang efisien dan tepat.
+Selalu jawab dalam Bahasa Indonesia dengan jelas dan ringkas.
+Jawaban 1–3 kalimat. Langsung ke inti.
+Jangan bilang kamu AI.
+Gunakan bahasa profesional tapi tetap ramah.
+Jika ada langkah-langkah, sebutkan secara terstruktur.`,
+    exampleResponses: [
+      "Berikut ringkasannya: 1) ..., 2) ..., 3) ...",
+      "Baik, saya akan membantu mempersiapkannya.",
+    ],
+    ttsSpeed: 0.95,
+  },
+  playful: {
+    name: "Rafiq (Playful)",
+    description: "Fun, witty, uses emojis. Best for entertainment/smartspeaker.",
+    basePrompt: `Namamu Rafiq. Kamu asisten suara yang playful, witty, dan penuh energi positif!
+Selalu jawab dalam Bahasa Indonesia.
+Jawaban pendek — 1–3 kalimat.
+Boleh gunakan emoji yang sesuai untuk menambah kehangatan.
+Jangan bilang kamu AI.
+Tunjukkan rasa humor yang natural — jangan berlebihan.
+Kalau ada fakta menarik, boleh sebutkan!`,
+    exampleResponses: [
+      "Nah itu dia! 🧠 Keren kan?",
+      "Hahaha, good one! 😄 Lanjut yuk!",
+    ],
+    ttsSpeed: 1.05,
+  },
+};
+
+/**
+ * Build a full system prompt with persona, user name, and context.
+ */
+export function buildPersonaPrompt(options: {
+  tone?: PersonaTone;
+  userName?: string;
+  memoryContext?: string;
+  extraInstructions?: string;
+}): string {
+  const tone = options.tone || "warm";
+  const preset = PERSONA_PRESETS[tone];
+
+  const sections: string[] = [preset.basePrompt];
+
+  if (options.userName) {
+    sections.push(`Nama pengguna: ${options.userName}`);
+  }
+
+  if (options.memoryContext) {
+    sections.push(
+      `[KONTEKS MEMORY]\n${options.memoryContext}\n[/KONTEKS MEMORY]`
+    );
+  }
+
+  if (options.extraInstructions) {
+    sections.push(`[INSTRUKSI TAMBAHAN]\n${options.extraInstructions}\n[/INSTRUKSI TAMBAHAN]`);
+  }
+
+  return sections.join("\n\n");
+}
 
 /**
  * Builds the CustomLLM config for agora-agents SDK using MiniMax.
@@ -203,19 +318,15 @@ export function buildMiniMaxLLMConfig(overrides: {
       use_tokens: true,
     },
     systemMessages:
-      overrides.systemMessages ||
-      [
+      overrides.systemMessages || [
         {
           role: "system",
-          content:
-            "Kamu adalah asisten suara AI yang hangat dan ramah.\n" +
-            "Selalu jawab dalam Bahasa Indonesia.\n" +
-            "Jawaban singkat — 1 sampai 3 kalimat.\n" +
-            "Jangan bilang kamu AI.",
+          content: PERSONA_PRESETS.warm.basePrompt,
         },
       ],
     greetingMessage:
-      overrides.greetingMessage || "Halo! Saya asisten suara Anda. Ada yang bisa saya bantu?",
+      overrides.greetingMessage ||
+      "Halo! Aku Rafiq. Ada yang bisa aku bantu hari ini?",
     maxHistory: 32,
   };
 }
