@@ -31,7 +31,7 @@ Browser mic → [Agora RTC] → Agent (server)
                           Agent audio → [Agora RTC] → Browser
 ```
 
-**Dual mode**: `AGORA_APP_ID` set → Agora SDK mode. NOT set → legacy WebSocket mode (Groq Whisper + Edge TTS).
+**Dual mode**: `AGORA_APP_ID` set → Agora SDK mode. NOT set → legacy WebSocket mode (Rafiqspace STT + MiniMax LLM + MiniMax TTS).
 
 ## Key files
 
@@ -69,7 +69,8 @@ MINIMAX_API_BASE_URL # https://api.minimax.chat (global) or CN endpoint
 MINIMAX_TTS_URL     # https://api.minimax.io/v1/t2a_v2
 
 # Optional — legacy mode (when AGORA_APP_ID unset)
-GROQ_API_KEY         # Groq Whisper + Llama (legacy STT + LLM)
+RAFIQ_API_KEY         # Rafiqspace STT (legacy mode)
+RAFIQ_BASE_URL           # https://api.rafiqspace.ai/api/v1
 
 # TiDB memory (optional — degrades gracefully if missing)
 TIDB_HOST
@@ -121,7 +122,7 @@ Edit the `turnDetection` block in `lib/agora.ts` → `buildAgent()`:
 - **generateRtcToken**: Sync function, do NOT await it.
 - **agora-access-token**: Namespace-based API (`RtcTokenBuilder.buildTokenWithUid`), NOT class-based.
 - **Memory degrades gracefully**: If TiDB env vars are missing, sessions still work — memory just doesn't load.
-- **Do NOT set AGORA_APP_ID for legacy mode**: Leave it unset to use Groq + Edge TTS.
+- **Do NOT set AGORA_APP_ID for legacy mode**: Leave it unset to use Rafiqspace + MiniMax.
 
 ## Test locally
 

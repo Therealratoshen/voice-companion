@@ -15,10 +15,10 @@
 - **Agent config:** `lib/minimax.ts` — `buildMiniMaxLLMConfig` + `buildMiniMaxTTSConfig`
 - **Memory:** `lib/memory.ts` — context injected as system message at session start, extracted at session end
 
-#### Legacy WebSocket (Groq + Edge TTS)
-- **STT:** Groq Whisper (browser → WebSocket → Groq)
-- **LLM:** MiniMax (`lib/ws-handler-legacy.ts`)
-- **TTS:** Edge TTS (server-side synthesis)
+#### Legacy WebSocket (Rafiqspace + MiniMax)
+- **STT:** Rafiqspace async API (`lib/rafiq.ts`)
+- **LLM:** MiniMax streaming (`lib/ws-handler-legacy.ts`)
+- **TTS:** MiniMax speech-02-hd (server-side synthesis)
 - **Transport:** `server.js` WebSocket server
 - Active when `AGORA_APP_ID` is unset
 
@@ -30,7 +30,8 @@
 | `lib/agora.ts` | Agora agent builder, session registry, control methods |
 | `lib/minimax.ts` | MiniMax LLM + TTS + personality system |
 | `lib/memory.ts` | TiDB memory: context injection, fact extraction, session summaries |
-| `lib/ws-handler-legacy.ts` | Legacy WebSocket pipeline (Groq + Edge TTS) |
+| `lib/ws-handler-legacy.ts` | Legacy WebSocket pipeline (Rafiqspace STT + MiniMax LLM + TTS) |
+| `lib/rafiq.ts` | Rafiqspace STT client — async upload→poll→transcribe |
 | `lib/token.ts` | RTC token generator (agora-access-token v2 namespace API) |
 | `app/voice/page.tsx` | Browser UI (Agora RTC + Web Audio) |
 | `app/api/session/create/route.ts` | Session create — builds agent, injects memory, starts |

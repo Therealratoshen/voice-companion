@@ -144,7 +144,7 @@ voice-companion/
 │   ├── agora.ts                 # Agora Agents SDK setup + session management
 │   ├── minimax.ts               # MiniMax LLM + TTS clients + SDK config builders
 │   ├── memory.ts                # TiDB memory search + upsert
-│   ├── groq.ts                  # Groq LLM (legacy mode)
+│   ├── groq.ts                  # (unused — kept for reference)
 │   └── token.ts                 # RTC token generator fallback
 │
 ├── app/
@@ -170,7 +170,7 @@ The server auto-detects which mode to use based on your environment:
 | Mode | Trigger | STT | LLM | TTS |
 |------|---------|-----|-----|-----|
 | **Agora (default)** | `AGORA_APP_ID` is set | Deepgram | MiniMax | MiniMax |
-| **Legacy WebSocket** | `AGORA_APP_ID` is NOT set | Groq Whisper | Groq Llama | Edge TTS |
+| **Legacy WebSocket** | `AGORA_APP_ID` is NOT set | Rafiqspace | MiniMax | MiniMax |
 
 ---
 

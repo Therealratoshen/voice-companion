@@ -4,9 +4,9 @@
  * Runs on port 3456 (or PORT env var).
  *
  * Two modes:
- *  1. Legacy WebSocket mode — original Groq STT + Edge TTS pipeline
+ *  1. Legacy WebSocket mode — Rafiqspace STT + MiniMax LLM + MiniMax TTS
  *     (activated when AGORA_APP_ID is not set)
- *  2. Agora mode — Agora Agents SDK with MiniMax LLM + TTS
+ *  2. Agora mode — Agora Agents SDK (Deepgram STT + MiniMax LLM + MiniMax TTS)
  *     (activated when AGORA_APP_ID is set)
  *
  * API routes (Next.js App Router):

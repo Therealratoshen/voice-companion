@@ -13,7 +13,7 @@ A real-time voice AI companion for Indonesian users that:
 - Listens to natural speech (Bahasa Indonesia, English)
 - Responds with warmth and empathy using MiniMax LLM + TTS
 - Remembers user preferences, facts, and conversation history via TiDB
-- Operates in two modes: **Agora Agents** (full managed pipeline) or **Legacy WebSocket** (Groq + Edge TTS)
+- Operates in two modes: **Agora Agents** (Agora RTC + Deepgram STT + MiniMax) or **Legacy WebSocket** (Rafiqspace STT + MiniMax LLM + MiniMax TTS)
 
 ## Tech Stack
 
@@ -22,7 +22,7 @@ A real-time voice AI companion for Indonesian users that:
 - **LLM:** MiniMax (`abab6.5s-chat` via OpenAI-compatible API)
 - **TTS:** MiniMax `speech-02-hd`
 - **STT (Agora):** Deepgram `nova-3` (managed by Agora)
-- **STT (Legacy):** Groq Whisper
+- **STT (Legacy):** Rafiqspace async API (upload → poll → transcript)
 - **Memory:** TiDB Serverless (MySQL-compatible, FULLTEXT search)
 - **Deployment:** VPS / Docker
 

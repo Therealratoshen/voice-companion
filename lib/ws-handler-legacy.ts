@@ -1,83 +1,26 @@
 /**
  * Legacy WebSocket voice handler — used when AGORA_APP_ID is not set.
  *
- * Pipeline: Groq Whisper STT → Groq Llama LLM → Edge TTS (id-ID-ArdiNeural)
+ * Pipeline: Rafiqspace STT → MiniMax LLM → MiniMax TTS
  *
- * Kept for local development / testing without Agora credentials.
+ * Rafiqspace handles STT (async: upload → start job → poll),
+ * MiniMax handles both LLM (streaming chat) and TTS (speech-02-hd).
  */
 
 import { randomUUID } from "crypto";
-import { groqStream } from "./groq";
+import { rafiqSTT } from "./rafiq";
+import { minimaxChatStream, minimaxTTS } from "./minimax";
 
-// ── Groq Whisper STT (inline — only used in legacy mode) ────────────────────
-async function groqSTT(audioBuffer: Buffer) {
-  const formData = new FormData();
-  formData.append("file", new Blob([new Uint8Array(audioBuffer)]), "audio.webm");
-  formData.append("model", "whisper-large-v3");
-  formData.append("response_format", "verbose_json");
-  formData.append("timestamp_granularities[]", "word");
+// ── System prompt (synchronized with agora mode) ──────────────────────────────
+const SYSTEM_PROMPT = `Namamu Rafiq. Kamu asisten suara yang hangat, empatik, dan sangat manusiawi.
+Kamu adalah " رفيق " (ra-feeq) — teman sejati.
+Selalu jawab dalam Bahasa Indonesia dengan penuh kehangatan.
+Jawaban pendek — 1 sampai 3 kalimat. Jangan bilang kamu AI.
+Jangan robotik — bicara seperti teman yang peduli.
+Tunjukkan empati: "Wah, pasti capek ya", "Aku ngerti perasaanmu."
+Jika kamu tidak tahu sesuatu, bilang jujur.`;
 
-  const res = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-    body: formData,
-  });
-  const data = await res.json();
-  return { text: data.text || "", segments: data.segments || [] };
-}
-
-const SYSTEM_PROMPT = `Kamu adalah asisten suara AI yang hangat dan ramah di telepon.
-Selalu jawab dalam Bahasa Indonesia.
-Jawaban singkat — 1 sampai 3 kalimat. Jangan bilang kamu AI.`;
-
-// ── Edge TTS ────────────────────────────────────────────────────────────────
-
-function edgeTTS(text: string, voice = "id-ID-ArdiNeural"): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const { spawn } = require("child_process");
-    const tmpMp3 = `/tmp/tts_${randomUUID()}.mp3`;
-    const edge = spawn("edge-tts", [
-      "--text", text,
-      "--voice", voice,
-      "--write-media", tmpMp3,
-    ]);
-    edge.on("close", (code: number) => {
-      if (code !== 0) { reject(new Error(`edge-tts exited ${code}`)); return; }
-      try {
-        const { readFileSync, unlinkSync } = require("fs");
-        const mp3Data = readFileSync(tmpMp3);
-        unlinkSync(tmpMp3);
-        resolve(mp3Data);
-      } catch (e) { reject(e); }
-    });
-    edge.on("error", reject);
-  });
-}
-
-// ── Groq STT ───────────────────────────────────────────────────────────────
-
-async function whisperSTT(audioBuffer: Buffer) {
-  const formData = new FormData();
-  formData.append("file", new Blob([new Uint8Array(audioBuffer)]), "audio.webm");
-  formData.append("model", "whisper-large-v3");
-  formData.append("response_format", "verbose_json");
-  formData.append("timestamp_granularities[]", "word");
-
-  const res = await fetch(
-    "https://api.groq.com/openai/v1/audio/transcriptions",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
-      },
-      body: formData,
-    }
-  );
-  const data = await res.json();
-  return { text: data.text || "", segments: data.segments || [] };
-}
-
-// ── Handler ─────────────────────────────────────────────────────────────────
+// ── TTS helpers ─────────────────────────────────────────────────────────────
 
 const ttsQueue: string[] = [];
 let ttsBusy = false;
@@ -89,30 +32,57 @@ async function processTTSQueue(
   ttsBusy = true;
   const text = ttsQueue.shift()!;
   try {
-    const mp3Data = await edgeTTS(text);
-    sendFn(mp3Data.toString("base64"));
-  } catch (e: any) {
-    console.error("[Legacy WS] TTS error:", e.message);
+    const mp3Buffer = await minimaxTTS(text);
+    sendFn(mp3Buffer.toString("base64"));
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[Legacy WS] TTS error:", msg);
+    wsSend(sendFn, { type: "error", message: msg });
   }
   ttsBusy = false;
   if (ttsQueue.length > 0) processTTSQueue(sendFn);
 }
 
+function wsSend(
+  sendFn: (data: string) => void,
+  payload: Record<string, unknown>
+): void {
+  try {
+    sendFn(JSON.stringify(payload));
+  } catch {}
+}
+
+// ── Main handler ─────────────────────────────────────────────────────────────
+
 export async function handleVoiceSession(
   ws: { send: (data: string) => void },
   audioBuffer: Buffer
 ): Promise<void> {
+  const send = (data: string) => ws.send(data);
+
   try {
-    const { text: transcript } = await whisperSTT(audioBuffer);
-    console.log("[Legacy WS] STT:", transcript ? `"${transcript}"` : "(empty)");
+    // ── Step 1: STT via Rafiqspace ────────────────────────────────────
+    console.log(`[Legacy WS] STT: audio=${audioBuffer.byteLength} bytes`);
+    const { text: transcript } = await rafiqSTT(audioBuffer);
+    console.log(
+      `[Legacy WS] STT result: "${transcript.slice(0, 120)}${
+        transcript.length > 120 ? "..." : ""
+      }"`
+    );
 
     if (!transcript || transcript.trim().length < 2) {
-      ws.send(JSON.stringify({ type: "tts_fallback", text: "I'm here. Say something!" }));
+      wsSend(send, {
+        type: "tts_fallback",
+        text: "Aku di sini. Silakan bicara ya!",
+      });
+      await playTTSFallback(send);
       return;
     }
 
-    ws.send(JSON.stringify({ type: "transcript", text: transcript }));
+    // Send transcript to frontend
+    wsSend(send, { type: "transcript", text: transcript });
 
+    // ── Step 2: LLM via MiniMax streaming ─────────────────────────────
     const messages = [
       { role: "system" as const, content: SYSTEM_PROMPT },
       { role: "user" as const, content: transcript },
@@ -121,43 +91,95 @@ export async function handleVoiceSession(
     let fullResponse = "";
     let pendingWord = "";
 
-    for await (const chunk of groqStream(messages)) {
+    const startTime = Date.now();
+
+    for await (const chunk of minimaxChatStream(messages)) {
       fullResponse += chunk;
       pendingWord += chunk;
 
+      // Stream words to frontend on punctuation/space
       if (chunk.match(/[\s.,!?]/)) {
-        ws.send(JSON.stringify({ type: "llm_word", text: pendingWord.trim() }));
+        wsSend(send, { type: "llm_word", text: pendingWord.trim() });
         pendingWord = "";
       }
-
-      // Buffer for TTS every 30 chars
-      while (ttsQueue.join("").length < 30) {
-        const words = fullResponse.split(" ");
-        if (words.length < 5) break;
-        const cut = words.slice(0, -1).join(" ").length;
-        const toTTS = fullResponse.slice(0, cut);
-        fullResponse = fullResponse.slice(cut + 1);
-        if (toTTS.trim()) ttsQueue.push(toTTS.trim());
-      }
-
-      processTTSQueue((data) =>
-        ws.send(JSON.stringify({ type: "tts_audio", data, mimeType: "audio/mpeg" }))
-      );
     }
 
-    if (pendingWord) ws.send(JSON.stringify({ type: "llm_word", text: pendingWord.trim() }));
-    if (fullResponse.trim()) ttsQueue.push(fullResponse.trim());
+    if (pendingWord) {
+      wsSend(send, { type: "llm_word", text: pendingWord.trim() });
+    }
+    if (fullResponse.trim()) {
+      wsSend(send, { type: "llm_word", text: fullResponse.trim() });
+    }
 
+    wsSend(send, { type: "llm_done", text: fullResponse.trim() });
+
+    const llmLatencyMs = Date.now() - startTime;
+    console.log(
+      `[Legacy WS] LLM done — ${llmLatencyMs}ms — "${fullResponse.slice(0, 80)}..."`
+    );
+
+    // ── Step 3: TTS via MiniMax speech-02-hd ──────────────────────────
+    // Split response into natural TTS chunks (sentences)
+    const chunks = splitIntoChunks(fullResponse.trim());
+
+    for (const chunk of chunks) {
+      if (!chunk.trim()) continue;
+      ttsQueue.push(chunk.trim());
+    }
+
+    // Process all TTS chunks, sending audio as it's ready
+    let ttsIndex = 0;
     while (ttsQueue.length > 0) {
-      await new Promise((r) => setTimeout(r, 100));
-      await processTTSQueue((data) =>
-        ws.send(JSON.stringify({ type: "tts_audio", data, mimeType: "audio/mpeg" }))
-      );
+      await new Promise((r) => setTimeout(r, 50));
+      await processTTSQueue(send);
+      if (ttsIndex === 0 && ttsQueue.length < chunks.length) {
+        ttsIndex++;
+      }
     }
 
-    ws.send(JSON.stringify({ type: "llm_done", text: fullResponse.trim() }));
-  } catch (err: any) {
-    console.error("[Legacy WS] Session error:", err);
-    ws.send(JSON.stringify({ type: "error", message: err.message }));
+    console.log(`[Legacy WS] Session complete`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[Legacy WS] Session error:", msg);
+    wsSend(send, { type: "error", message: msg });
+
+    // Try to say sorry as fallback
+    try {
+      const sorry = await minimaxTTS("Maaf, ada masalah teknis. Coba lagi ya.");
+      wsSend(send, {
+        type: "tts_audio",
+        data: sorry.toString("base64"),
+        mimeType: "audio/mp3",
+      });
+    } catch {}
   }
+}
+
+// ── Utilities ──────────────────────────────────────────────────────────────
+
+/** Split a long response into TTS-friendly sentence chunks. */
+function splitIntoChunks(text: string, maxChars = 200): string[] {
+  // Split on sentence-ending punctuation
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const sentence of sentences) {
+    if (current.length + sentence.length <= maxChars) {
+      current += (current ? " " : "") + sentence;
+    } else {
+      if (current) chunks.push(current.trim());
+      current = sentence;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+/** Play a very short fallback TTS (MiniMax) for empty input. */
+async function playTTSFallback(send: (data: string) => void): Promise<void> {
+  try {
+    const mp3 = await minimaxTTS("Aku di sini. Silakan bicara ya!");
+    send(mp3.toString("base64"));
+  } catch {}
 }
